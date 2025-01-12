@@ -15,6 +15,7 @@
 		"@torbox/torbox-api": "^1.0.6",
 		"@types/node": "^18.19.67",
 		"all-debrid-api": "^1.2.0",
+		"axios": "^1.7.9",
 		"cors": "^2.8.5",
 		"debrid-link-api": "^1.0.1",
 		"dotenv": "^16.4.5",
