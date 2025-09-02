@@ -51,7 +51,7 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
 
             if (finalUrl) {
                 RESOLVED_URL_CACHE.set(cacheKey, finalUrl);
-//                setTimeout(() => RESOLVED_URL_CACHE.delete(cacheKey), 2 * 60 * 60 * 1000);
+                setTimeout(() => RESOLVED_URL_CACHE.delete(cacheKey), 2 * 60 * 60 * 1000);
             }
         }
 
