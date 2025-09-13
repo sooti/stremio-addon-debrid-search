@@ -25,7 +25,7 @@ app.use(swStats.getMiddleware({
 // Rate limiter middleware (unchanged)
 const rateLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
-    limit: 300,
+    limit: 1000,
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => requestIp.getClientIp(req)
