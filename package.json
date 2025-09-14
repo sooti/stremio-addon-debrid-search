@@ -16,7 +16,7 @@
 		"@types/node": "^18.19.67",
 		"all-debrid-api": "^1.2.0",
 		"axios": "^1.7.9",
-		"xml2js": "^0.6.2",
+		"cheerio": "^1.1.2",
 		"cors": "^2.8.5",
 		"debrid-link-api": "^1.0.1",
 		"dotenv": "^16.4.5",
@@ -24,6 +24,7 @@
 		"express-rate-limit": "^7.4.1",
 		"fuse.js": "^7.1.0",
 		"loglevel": "^1.9.2",
+		"node-cache": "^5.1.2",
 		"node-fetch": "^3.3.2",
 		"offcloud-api": "^1.0.2",
 		"parse-torrent-title": "github:TheBeastLT/parse-torrent-title#b98e2ba2fb64fd5fa1c34c620bd9050bbc2e271d",
@@ -34,7 +35,8 @@
 		"router": "^1.3.8",
 		"stremio-addon-sdk": "^1.6.10",
 		"swagger-stats": "^0.99.7",
-		"urlencode": "^2.0.0"
+		"urlencode": "^2.0.0",
+		"xml2js": "^0.6.2"
 	},
 	"keywords": [
 		"stremio",
