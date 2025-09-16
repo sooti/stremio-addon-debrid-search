@@ -70,26 +70,21 @@ Steps
     Clone the Repository:
     Bash
 
-git clone https://github.com/your-username/sootio-stremio-addon.git
-cd sootio-stremio-addon
+1. git clone https://github.com/your-username/sootio-stremio-addon.git
+2. cd sootio-stremio-addon
 
 Install Dependencies:
 Bash
 
-npm install
+1. npm install
 
 Configure: Create a file named .env in the project root by copying the .env.example file. Then, edit the .env file with your settings. See the Configuration Details section below for an explanation of all options.
 Code snippet
 
-# --- CORE SETTINGS ---
-DEBRID_PROVIDER=RealDebrid
-DEBRID_API_KEY=YOUR_API_KEY_HERE
-
 # --- SCRAPER SETTINGS ---
-JACKETT_URL=http://127.0.0.1:9117
+JACKETT_URL=YOUR_JACKET_URL
 JACKETT_API_KEY=YOUR_JACKETT_API_KEY
-JACKETT_ENABLED=true
-TORRENTIO_ENABLED=true
+Enable any further scrapers you want in the .env file, torrentio, comet and all public services are disabled by default to discourage overflowing public services (On my public instance as well, I use self hosted trackers and scrapers) but if you want to do a self hosted you can enable public scraping
 
 # --- See Configuration Details below for all options ---
 
@@ -116,9 +111,13 @@ MAX_H265_RESULTS_PER_QUALITY	Max number of H.265 (x265/HEVC) results to return f
 MAX_H264_RESULTS_PER_QUALITY	Max number of H.264 (x264/AVC) results to return for each quality/resolution combination.	2
 RD_DEBUG_LOGS	If true, enables verbose logging for debugging the prioritization and filtering process.	false
 
+* Notes on current issues:
+1. Only Real-Debrid & Offcloud currently support cache checking on the debrid services using hashes, the rest use the original functions of searching the personal cloud, I may add it in the future but I would need some help paying for at least a few months of service for other debrid services to look at their APIs and develop + test
+2. Hashes are cached for a set amount of time locally to reduce API request strain and improve search time on RD but initial searches can take up to 30 seconds on non popular releases so keep in mind.
 🤝 Contributing
 
 Contributions, issues, and feature requests are welcome! Feel free to check the issues page.
+Original add-on that this project is forked from is https://github.com/MrMonkey42/stremio-addon-debrid-search, credit to @MrMonkey42 for the initial cloud searching functions
 
 📝 License
 
