@@ -16,13 +16,11 @@ const app = express();
 app.enable('trust proxy');
 app.use(cors());
 
-// Swagger stats middleware (unchanged)
 app.use(swStats.getMiddleware({
     name: addonInterface.manifest.name,
     version: addonInterface.manifest.version,
 }));
 
-// Rate limiter middleware (unchanged)
 const rateLimiter = rateLimit({
     windowMs: 120 * 120 * 1000,
     limit: 1000,
@@ -32,22 +30,22 @@ const rateLimiter = rateLimit({
 });
 app.use(rateLimiter);
 
-// VVVV REVERTED: The resolver now performs a simple redirect VVVV
+// **START: CORRECTED RESOLVER ROUTE**
+// This route now correctly matches the URL structure and passes the right parameters.
 app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
     const { debridProvider, debridApiKey, url } = req.params;
-    const decodedUrl = decodeURIComponent(url);
     const clientIp = requestIp.getClientIp(req);
-    const cacheKey = `${debridProvider}:${decodedUrl}`;
+    const cacheKey = `${debridProvider}:${url}`;
 
     try {
         let finalUrl;
-
         if (RESOLVED_URL_CACHE.has(cacheKey)) {
             finalUrl = RESOLVED_URL_CACHE.get(cacheKey);
             console.log(`[CACHE] Using cached URL for key: ${cacheKey}`);
         } else {
-            console.log(`[RESOLVER] Cache miss. Resolving URL for ${debridProvider}: ${decodedUrl}`);
-            finalUrl = await streamProvider.resolveUrl(debridProvider, debridApiKey, null, decodedUrl, clientIp);
+            console.log(`[RESOLVER] Cache miss. Resolving URL for ${debridProvider}: ${decodeURIComponent(url)}`);
+            // This now passes the parameters in the correct order to the stream provider.
+            finalUrl = await streamProvider.resolveUrl(debridProvider, debridApiKey, url, clientIp);
 
             if (finalUrl) {
                 RESOLVED_URL_CACHE.set(cacheKey, finalUrl);
@@ -56,8 +54,7 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
         }
 
         if (finalUrl) {
-            console.log("[RESOLVER] Redirecting to final stream URL:", finalUrl);
-            // Issue a 302 redirect to the final URL.
+            console.log("[RESOLVER] Redirecting to final stream URL.");
             res.redirect(302, finalUrl);
         } else {
             res.status(404).send('Could not resolve link');
@@ -67,6 +64,8 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
         res.status(500).send("Error resolving stream.");
     }
 });
+// **END: CORRECTED RESOLVER ROUTE**
+
 
 app.use((req, res, next) => serverless(req, res, next));
 
