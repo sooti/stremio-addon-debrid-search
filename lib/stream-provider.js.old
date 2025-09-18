@@ -1,0 +1,198 @@
+import Cinemeta from './util/cinemeta.js';
+import RealDebrid from './real-debrid.js';
+import RealDebridClient from 'real-debrid-api';
+import OffCloud from './offcloud.js';
+import { isValidVideo } from './common/torrent-utils.js';
+
+const ADDON_HOST = process.env.ADDON_URL;
+
+const STREAM_NAME_MAP = {
+    realdebrid: "[RD+] DebridSearch",
+    offcloud: "[OC+] DebridSearch"
+};
+
+function getResolutionFromName(name) {
+    if (!name) return 'other';
+    const lowerCaseName = name.toLowerCase();
+    if (lowerCaseName.includes('2160p') || lowerCaseName.includes('4k') || lowerCaseName.includes('uhd')) return '2160p';
+    if (lowerCaseName.includes('1080p')) return '1080p';
+    if (lowerCaseName.includes('720p')) return '720p';
+    if (lowerCaseName.includes('480p')) return '480p';
+    return 'other';
+}
+
+function toStream(details, type, config) {
+    const debridProvider = (config.DebridProvider || '').toLowerCase();
+    
+    let urlComponent;
+    if (details.url && !details.url.startsWith('magnet:')) {
+        urlComponent = details.url;
+    } else {
+        let magnet = `magnet:?xt=urn:btih:${details.infoHash}`;
+        if (details.fileIdx !== undefined) {
+            magnet += `#${details.fileIdx}`;
+        }
+        urlComponent = magnet;
+    }
+    
+    const encodedApiKey = encodeURIComponent(config.DebridApiKey || '');
+    const encodedUrl = encodeURIComponent(urlComponent);
+    const streamUrl = `${ADDON_HOST}/resolve/${debridProvider}/${encodedApiKey}?url=${encodedUrl}`;
+
+    const quality = getResolutionFromName(details.title);
+    const name = STREAM_NAME_MAP[debridProvider] ? `${STREAM_NAME_MAP[debridProvider]}\n${quality}` : `[DebridSearch]\n${quality}`;
+
+    return {
+        name: name,
+        title: details.title,
+        url: streamUrl,
+        behaviorHints: details.behaviorHints || {
+            bingeGroup: `${debridProvider}|${details.infoHash}`
+        }
+    };
+}
+
+async function getMovieStreams(config, type, id) {
+    const debridProvider = (config.DebridProvider || '').toLowerCase();
+    const apiKey = config.DebridApiKey;
+
+    if (debridProvider === "realdebrid") {
+        const results = await RealDebrid.searchRealDebridTorrents(apiKey, type, id);
+        return results.map(item => toStream(item, type, config));
+    }
+    return [];
+}
+
+async function getSeriesStreams(config, type, id) {
+    const debridProvider = (config.DebridProvider || '').toLowerCase();
+    const apiKey = config.DebridApiKey;
+
+    if (debridProvider === "realdebrid") {
+        const allResults = await RealDebrid.searchRealDebridTorrents(apiKey, type, id);
+        if (!allResults || allResults.length === 0) {
+            return [];
+        }
+        return allResults.map(torrent => toStream(torrent, type, config)).filter(Boolean);
+    } else if (debridProvider === "offcloud") {
+        const torrents = await OffCloud.searchOffcloudTorrents(apiKey, type, id);
+        if (torrents && torrents.length) {
+            return torrents.map(torrent => toStream(torrent, type, config)).filter(Boolean);
+        }
+    }
+    return [];
+}
+
+async function resolveUrl(debridProvider, apiKey, encodedUrl, clientIp) {
+    const provider = debridProvider.toLowerCase();
+    const url = decodeURIComponent(encodedUrl);
+
+    if (provider === "realdebrid") {
+        if (!url.startsWith('magnet:')) {
+            console.log(`[RESOLVER] RD: Unrestricting direct link...`);
+            return RealDebrid.unrestrictUrl(apiKey, url, clientIp);
+        }
+
+        console.log(`[RESOLVER] RD: Resolving magnet link: ${url}`);
+        const RD = new RealDebridClient(apiKey);
+        let torrentId = null;
+        
+        let magnet = url;
+        let fileIdx = 'best';
+
+        if (url.includes('#')) {
+            const parts = url.split('#');
+            magnet = parts[0];
+            fileIdx = parts[1];
+        }
+        
+        const infoHashMatch = magnet.match(/btih:([a-zA-Z0-9]{40})/i);
+        if (!infoHashMatch) {
+            console.error(`[RESOLVER] RD: Could not parse infoHash from magnet: ${magnet}`);
+            return null;
+        }
+        const infoHash = infoHashMatch[1];
+        console.log(`[RESOLVER] RD: Parsed infoHash ${infoHash} | File index: ${fileIdx}`);
+
+        try {
+            const torrents = await RD.torrents.get();
+            let existingTorrent = torrents.data.find(t => t.hash.toLowerCase() === infoHash.toLowerCase());
+
+            if (existingTorrent) {
+                console.log(`[RESOLVER] RD: Found existing torrent in account (ID: ${existingTorrent.id})`);
+                torrentId = existingTorrent.id;
+            } else {
+                const addResponse = await RD.torrents.addMagnet(magnet);
+                torrentId = addResponse?.data?.id;
+                if (!torrentId) {
+                    throw new Error("Failed to add magnet to Real-Debrid.");
+                }
+                console.log(`[RESOLVER] RD: Added new magnet, received ID: ${torrentId}`);
+            }
+
+            const initialInfo = await RD.torrents.info(torrentId);
+            const files = initialInfo?.data?.files;
+            if (!files || files.length === 0) {
+                throw new Error("Torrent contains no files.");
+            }
+
+            let targetFileId;
+            if (fileIdx && fileIdx !== 'best') {
+                const fileIndexNumber = parseInt(fileIdx, 10);
+                targetFileId = files[fileIndexNumber]?.id;
+            } else {
+                const videoFiles = files.filter(f => isValidVideo(f.path, f.bytes));
+                if (videoFiles.length === 0) {
+                    throw new Error("No valid video files found in torrent.");
+                }
+                const largestVideo = videoFiles.reduce((prev, current) => (prev.bytes > current.bytes) ? prev : current);
+                targetFileId = largestVideo.id;
+            }
+
+            if (!targetFileId) {
+                throw new Error(`Could not determine a file to select for index: ${fileIdx}`);
+            }
+            
+            console.log(`[RESOLVER] RD: Selecting file ID: ${targetFileId}.`);
+            await RD.torrents.selectFiles(torrentId, targetFileId);
+
+            for (let i = 0; i < 10; i++) {
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                const info = await RD.torrents.info(torrentId);
+                const status = info?.data?.status;
+                console.log(`[RESOLVER] RD: Poll #${i+1}: Torrent status is "${status}"`);
+                if (status === 'downloaded') break;
+                if (status === 'error' || status === 'magnet_error' || status === 'dead') {
+                    throw new Error(`Torrent failed with status: ${status}`);
+                }
+                 if (i === 9) {
+                    throw new Error("Torrent not ready after 30 seconds.");
+                }
+            }
+
+            const finalInfo = await RD.torrents.info(torrentId);
+            if (!finalInfo?.data?.links?.length) {
+                throw new Error("Torrent is ready but no streamable links were found.");
+            }
+            
+            const unrestrictedUrl = await RealDebrid.unrestrictUrl(apiKey, finalInfo.data.links[0], clientIp);
+            if (!unrestrictedUrl) {
+                throw new Error("Failed to unrestrict the Real-Debrid URL.");
+            }
+
+            console.log(`[RESOLVER] RD: ✅ Successfully resolved to streaming URL.`);
+            return unrestrictedUrl;
+
+        } catch (error) {
+            console.error(`[RESOLVER] RD: ❌ Error in magnet processing: ${error.message}`);
+            if (torrentId && !existingTorrent) {
+                try { await RD.torrents.delete(torrentId); } catch (e) {}
+            }
+            return null;
+        }
+    }
+    
+    console.error(`[RESOLVER] Provider "${provider}" not implemented.`);
+    return null;
+}
+
+export default { getMovieStreams, getSeriesStreams, resolveUrl };
