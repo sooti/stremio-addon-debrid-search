@@ -11,6 +11,7 @@ import addonInterface from "./addon.js";
 import streamProvider from './lib/stream-provider.js';
 
 const RESOLVED_URL_CACHE = new Map();
+const PENDING_RESOLVES = new Map();
 
 const app = express();
 app.enable('trust proxy');
@@ -30,6 +31,21 @@ const rateLimiter = rateLimit({
     legacyHeaders: false,
     keyGenerator: (req) => requestIp.getClientIp(req)
 });
+
+// Tune server timeouts for high traffic and keep-alive performance
+try {
+    server.keepAliveTimeout = parseInt(process.env.HTTP_KEEPALIVE_TIMEOUT || "65000", 10);
+    server.headersTimeout = parseInt(process.env.HTTP_HEADERS_TIMEOUT || "72000", 10);
+} catch (_) {}
+
+// Graceful shutdown
+for (const sig of ["SIGINT","SIGTERM"]) {
+    process.on(sig, () => {
+        console.log(`[SERVER] Received ${sig}. Shutting down...`);
+        server.close(() => process.exit(0));
+        setTimeout(() => process.exit(1), 10000).unref();
+    });
+}
 app.use(rateLimiter);
 
 // VVVV REVERTED: The resolver now performs a simple redirect VVVV
@@ -45,9 +61,15 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
         if (RESOLVED_URL_CACHE.has(cacheKey)) {
             finalUrl = RESOLVED_URL_CACHE.get(cacheKey);
             console.log(`[CACHE] Using cached URL for key: ${cacheKey}`);
+        } else if (PENDING_RESOLVES.has(cacheKey)) {
+            console.log(`[RESOLVER] Joining in-flight resolve for key: ${cacheKey}`);
+            finalUrl = await PENDING_RESOLVES.get(cacheKey);
         } else {
             console.log(`[RESOLVER] Cache miss. Resolving URL for ${debridProvider}: ${decodedUrl}`);
-            finalUrl = await streamProvider.resolveUrl(debridProvider, debridApiKey, null, decodedUrl, clientIp);
+            const p = streamProvider.resolveUrl(debridProvider, debridApiKey, null, decodedUrl, clientIp);
+            const timed = Promise.race([ p, new Promise((_, rej) => setTimeout(() => rej(new Error('Resolve timeout')), 20000)) ]);
+            PENDING_RESOLVES.set(cacheKey, timed.finally(() => PENDING_RESOLVES.delete(cacheKey)));
+            finalUrl = await timed;
 
             if (finalUrl) {
                 RESOLVED_URL_CACHE.set(cacheKey, finalUrl);
@@ -71,6 +93,6 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
 app.use((req, res, next) => serverless(req, res, next));
 
 const port = process.env.PORT || 6907;
-app.listen(port, () => {
+const server = app.listen(port, () => {
     console.log(`Started addon at: http://127.0.0.1:${port}`);
 });
