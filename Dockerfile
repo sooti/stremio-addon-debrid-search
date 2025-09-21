@@ -1,5 +1,5 @@
 # Use an official Node.js image
-FROM node:18
+FROM node:20
 
 # Set working directory inside container
 WORKDIR /app
@@ -17,4 +17,4 @@ COPY . .
 EXPOSE 6907
 
 # Start the dev server (using nodemon or your dev script)
-CMD ["npm", "run", "dev"]
+CMD ["npm", "run", "start"]
