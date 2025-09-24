@@ -91,7 +91,7 @@ Open the URL shown in terminal (e.g. `http://127.0.0.1:PORT`), enter your API ke
 
 ## ⚙️ Configuration
 
-All options are set via `.env`.
+Most core options are set via `.env`. Language preference is configured directly on the landing page (field: "Preferred torrent languages").
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -106,6 +106,16 @@ All options are set via `.env`.
 | `MAX_H265_RESULTS_PER_QUALITY` | Max H.265 results per tier | `2` |
 | `MAX_H264_RESULTS_PER_QUALITY` | Max H.264 results per tier | `2` |
 | `RD_DEBUG_LOGS` | Enable verbose debugging logs | `false` |
+| `LangPref` (UI) | Comma-separated language preference tokens. Releases that match any token appear FIRST (soft priority), then the rest. Examples: `ita`, `ita,eng,multi`, `por,eng`, `fra`. Synonyms auto-mapped: ita/italian/italiano, eng/english, multi/multilang/multiaudio, spa/spanish/español/cast, por/portuguese/portugues/br/brazil, fra/french/français/francais, ger/german/deutsch. Empty = no prioritization. | (empty) |
+
+### Language Prioritization Logic
+1. User enters tokens (e.g. `ita,eng,multi`).
+2. A single regex is built including synonyms for each token.
+3. Results whose name/title/path contain any token are placed at the top (original relative ordering preserved).
+4. Non-matching results are appended after the matching block.
+5. No results are removed; this is ordering only. Leave field empty to disable.
+
+Future ideas (not yet implemented): strict filtering mode, weighting per token, audio/subtitle language extraction.
 
 ---
 
