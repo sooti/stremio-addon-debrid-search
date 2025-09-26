@@ -1,20 +1,17 @@
-# Use an official Node.js image
-FROM node:20
-
-# Set working directory inside container
+# -------- Base build stage --------
+FROM node:20-slim AS deps
 WORKDIR /app
-
-# Copy only package.json and package-lock.json first (better build caching)
+ENV NODE_ENV=production
 COPY package*.json ./
+# Install only production dependencies; fall back to npm install if no lockfile
+RUN npm ci --omit=dev || npm install --omit=dev
 
-# Install dependencies
-RUN npm install
-
-# Copy rest of the project files
+# -------- Runtime stage --------
+FROM node:20-slim AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Expose app port (optional, e.g. if your app runs on 3000)
 EXPOSE 6907
-
-# Start the dev server (using nodemon or your dev script)
-CMD ["npm", "run", "start"]
+CMD ["node", "server.js"]

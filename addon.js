@@ -9,12 +9,15 @@ const STALE_ERROR_AGE = 1 * 24 * 60 * 60 // 1 days
 
 const builder = new addonBuilder(getManifest())
 
+const isDebugLog = (process.env.LOG_LEVEL || '').toLowerCase() === 'debug';
+const log = (...args) => { if (isDebugLog) console.log(...args); };
+
 builder.defineCatalogHandler((args) => {
     return new Promise((resolve, reject) => {
         const debugArgs = structuredClone(args)
         if (args.config?.DebridApiKey)
             debugArgs.config.DebridApiKey = '*'.repeat(args.config.DebridApiKey.length)
-        console.log("Request for catalog with args: " + JSON.stringify(debugArgs))
+        log("Request for catalog with args: " + JSON.stringify(debugArgs))
 
         // Request to Debrid Search
         if (args.id == 'debridsearch') {
@@ -26,7 +29,7 @@ builder.defineCatalogHandler((args) => {
             if (args.extra.search) {
                 CatalogProvider.searchTorrents(args.config, args.extra.search)
                     .then(metas => {
-                        console.log("Response metas: " + JSON.stringify(metas))
+                        log("Response metas: " + JSON.stringify(metas))
                         resolve({
                             metas,
                             ...enrichCacheParams()
@@ -37,7 +40,7 @@ builder.defineCatalogHandler((args) => {
                 // Standard catalog request
                 CatalogProvider.listTorrents(args.config, args.extra.skip)
                     .then(metas => {
-                        console.log("Response metas: " + JSON.stringify(metas))
+                        log("Response metas: " + JSON.stringify(metas))
                         resolve({
                             metas
                         })
@@ -62,13 +65,13 @@ builder.defineStreamHandler(args => {
         const debugArgs = structuredClone(args)
         if (args.config?.DebridApiKey)
             debugArgs.config.DebridApiKey = '*'.repeat(args.config.DebridApiKey.length)
-        console.log("Request for streams with args: " + JSON.stringify(debugArgs))
+        log("Request for streams with args: " + JSON.stringify(debugArgs))
 
         switch (args.type) {
             case 'movie':
                 StreamProvider.getMovieStreams(args.config, args.type, args.id)
                     .then(streams => {
-                        console.log("Response streams: " + JSON.stringify(streams))
+                        log("Response streams: " + JSON.stringify(streams))
                         resolve({
                             streams,
                             ...enrichCacheParams()
@@ -79,7 +82,7 @@ builder.defineStreamHandler(args => {
             case 'series':
                 StreamProvider.getSeriesStreams(args.config, args.type, args.id)
                     .then(streams => {
-                        console.log("Response streams: " + JSON.stringify(streams))
+                        log("Response streams: " + JSON.stringify(streams))
                         resolve({
                             streams,
                             ...enrichCacheParams()

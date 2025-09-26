@@ -9,6 +9,10 @@ import rateLimit from 'express-rate-limit';
 import swStats from 'swagger-stats';
 import addonInterface from "./addon.js";
 import streamProvider from './lib/stream-provider.js';
+import dns from 'node:dns';
+
+// Prefer IPv4 to avoid slow AAAA-first resolutions in some environments
+try { dns.setDefaultResultOrder('ipv4first'); } catch (_) {}
 
 const RESOLVED_URL_CACHE = new Map();
 const PENDING_RESOLVES = new Map();
@@ -17,11 +21,13 @@ const app = express();
 app.enable('trust proxy');
 app.use(cors());
 
-// Swagger stats middleware (unchanged)
-app.use(swStats.getMiddleware({
-    name: addonInterface.manifest.name,
-    version: addonInterface.manifest.version,
-}));
+// Optional metrics (guarded to reduce overhead in prod)
+if (process.env.ENABLE_METRICS === 'true') {
+    app.use(swStats.getMiddleware({
+        name: addonInterface.manifest.name,
+        version: addonInterface.manifest.version,
+    }));
+}
 
 // Rate limiter middleware (unchanged)
 const rateLimiter = rateLimit({
@@ -32,11 +38,7 @@ const rateLimiter = rateLimit({
     keyGenerator: (req) => requestIp.getClientIp(req)
 });
 
-// Tune server timeouts for high traffic and keep-alive performance
-try {
-    server.keepAliveTimeout = parseInt(process.env.HTTP_KEEPALIVE_TIMEOUT || "65000", 10);
-    server.headersTimeout = parseInt(process.env.HTTP_HEADERS_TIMEOUT || "72000", 10);
-} catch (_) {}
+// (moved below, after server initialization)
 
 // Graceful shutdown
 for (const sig of ["SIGINT","SIGTERM"]) {
@@ -96,3 +98,9 @@ const port = process.env.PORT || 6907;
 const server = app.listen(port, () => {
     console.log(`Started addon at: http://127.0.0.1:${port}`);
 });
+
+// Tune server timeouts for high traffic and keep-alive performance
+try {
+    server.keepAliveTimeout = parseInt(process.env.HTTP_KEEPALIVE_TIMEOUT || "65000", 10);
+    server.headersTimeout = parseInt(process.env.HTTP_HEADERS_TIMEOUT || "72000", 10);
+} catch (_) {}
