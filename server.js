@@ -9,6 +9,7 @@ import rateLimit from 'express-rate-limit';
 import swStats from 'swagger-stats';
 import addonInterface from "./addon.js";
 import streamProvider from './lib/stream-provider.js';
+import mongoCache from './lib/common/mongo-cache.js';
 
 const RESOLVED_URL_CACHE = new Map();
 const PENDING_RESOLVES = new Map();
@@ -95,4 +96,13 @@ app.use((req, res, next) => serverless(req, res, next));
 const port = process.env.PORT || 6907;
 const server = app.listen(port, () => {
     console.log(`Started addon at: http://127.0.0.1:${port}`);
+    if (mongoCache?.isEnabled()) {
+        mongoCache.initMongo().then(() => {
+            console.log('[CACHE] MongoDB cache initialized');
+        }).catch(err => {
+            console.error('[CACHE] MongoDB init failed:', err?.message || err);
+        });
+    } else {
+        console.log('[CACHE] MongoDB cache disabled');
+    }
 });

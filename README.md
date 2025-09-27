@@ -107,6 +107,18 @@ All options are set via `.env`.
 | `MAX_H264_RESULTS_PER_QUALITY` | Max H.264 results per tier | `2` |
 | `RD_DEBUG_LOGS` | Enable verbose debugging logs | `false` |
 
+### MongoDB Cache (Optional)
+
+You can enable an optional MongoDB-backed cache that stores information about cached magnets discovered on Debrid providers (Real-Debrid, OffCloud, TorBox). This reduces repeated API calls and speeds up queries. Entries expire automatically after a configurable TTL.
+
+- `MONGO_CACHE_ENABLED` – set to `true` to enable
+- `MONGO_URI` – connection string (e.g. `mongodb://localhost:27017`)
+- `MONGO_DB_NAME` – database name (default `sootio`)
+- `MONGO_CACHE_COLLECTION` – collection name (default `magnet_cache`)
+- `MONGO_CACHE_TTL_DAYS` – TTL in days for entries (default `30`)
+
+If disabled or not configured, the addon behaves as before (including optional Real-Debrid file cache).
+
 ---
 
 ## ⚠️ Notes & Current Issues
