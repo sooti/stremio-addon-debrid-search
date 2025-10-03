@@ -8,6 +8,7 @@ import requestIp from 'request-ip'
 import { getManifest } from './lib/util/manifest.js'
 import { parseConfiguration } from './lib/util/configuration.js'
 import { BadTokenError, BadRequestError, AccessDeniedError } from './lib/util/error-codes.js'
+import RealDebrid from './lib/real-debrid.js'
 
 const router = new Router();
 
@@ -34,7 +35,11 @@ router.get(`/:configuration?/:resource/:type/:id/:extra?.json`, (req, res, next)
     const extra = req.params.extra ? qs.parse(req.url.split('/').pop().slice(0, -5)) : {}
 
     addonInterface.get(resource, type, id, extra, config)
-        .then(resp => {
+        .then(async (resp) => {
+            if (config.DebridProvider === 'RealDebrid' && resp && resp.streams) {
+                resp.streams = await RealDebrid.validatePersonalStreams(config.DebridApiKey, resp.streams);
+            }
+
             let cacheHeaders = {
                 cacheMaxAge: 'max-age',
                 staleRevalidate: 'stale-while-revalidate',
