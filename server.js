@@ -9,7 +9,7 @@ import rateLimit from 'express-rate-limit';
 import swStats from 'swagger-stats';
 import addonInterface from "./addon.js";
 import streamProvider from './lib/stream-provider.js';
-import mongoCache from './lib/common/mongo-cache.js';
+import * as mongoCache from './lib/common/mongo-cache.js';
 
 const RESOLVED_URL_CACHE = new Map();
 const PENDING_RESOLVES = new Map();
