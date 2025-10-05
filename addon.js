@@ -14,11 +14,22 @@ builder.defineCatalogHandler((args) => {
         const debugArgs = structuredClone(args)
         if (args.config?.DebridApiKey)
             debugArgs.config.DebridApiKey = '*'.repeat(args.config.DebridApiKey.length)
+        if (args.config?.DebridServices && Array.isArray(args.config.DebridServices)) {
+            debugArgs.config.DebridServices = args.config.DebridServices.map(s => ({
+                provider: s.provider,
+                apiKey: s.apiKey ? '*'.repeat(s.apiKey.length) : ''
+            }))
+        }
         console.log("Request for catalog with args: " + JSON.stringify(debugArgs))
 
         // Request to Debrid Search
         if (args.id == 'debridsearch') {
-            if (!((args.config?.DebridProvider && args.config?.DebridApiKey) || args.config?.DebridLinkApiKey)) {
+            const hasValidConfig = (
+                (args.config?.DebridServices && Array.isArray(args.config.DebridServices) && args.config.DebridServices.length > 0) ||
+                (args.config?.DebridProvider && args.config?.DebridApiKey) ||
+                args.config?.DebridLinkApiKey
+            )
+            if (!hasValidConfig) {
                 reject(new Error('Invalid Debrid configuration: Missing configs'))
             }
 
@@ -62,6 +73,12 @@ builder.defineStreamHandler(args => {
         const debugArgs = structuredClone(args)
         if (args.config?.DebridApiKey)
             debugArgs.config.DebridApiKey = '*'.repeat(args.config.DebridApiKey.length)
+        if (args.config?.DebridServices && Array.isArray(args.config.DebridServices)) {
+            debugArgs.config.DebridServices = args.config.DebridServices.map(s => ({
+                provider: s.provider,
+                apiKey: s.apiKey ? '*'.repeat(s.apiKey.length) : ''
+            }))
+        }
         console.log("Request for streams with args: " + JSON.stringify(debugArgs))
 
         switch (args.type) {
