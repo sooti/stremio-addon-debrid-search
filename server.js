@@ -10,6 +10,7 @@ import swStats from 'swagger-stats';
 import addonInterface from "./addon.js";
 import streamProvider from './lib/stream-provider.js';
 import * as mongoCache from './lib/common/mongo-cache.js';
+import * as scraperCache from './lib/util/scraper-cache.js';
 
 const RESOLVED_URL_CACHE = new Map();
 const PENDING_RESOLVES = new Map();
@@ -91,11 +92,55 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
     }
 });
 
+// Middleware to check admin token
+function checkAdminAuth(req, res, next) {
+    const adminToken = process.env.ADMIN_TOKEN;
+    if (!adminToken) {
+        return res.status(503).json({
+            success: false,
+            message: 'Admin endpoints disabled. Set ADMIN_TOKEN environment variable to enable.'
+        });
+    }
+
+    const providedToken = req.headers['authorization']?.replace('Bearer ', '') || req.query.token;
+    if (providedToken !== adminToken) {
+        return res.status(401).json({
+            success: false,
+            message: 'Unauthorized. Invalid or missing admin token.'
+        });
+    }
+
+    next();
+}
+
+// Endpoint to manually clear in-memory scraper cache
+app.get('/admin/clear-scraper-cache', checkAdminAuth, (req, res) => {
+    const cleared = scraperCache.clear();
+    res.json({
+        success: true,
+        message: `In-memory scraper cache cleared successfully`,
+        entriesCleared: cleared
+    });
+});
+
+// Endpoint to clear MongoDB search cache (stream results)
+app.get('/admin/clear-search-cache', checkAdminAuth, async (req, res) => {
+    const result = await mongoCache.clearSearchCache();
+    res.json(result);
+});
+
+// Endpoint to clear ALL MongoDB cache (search results + torrent metadata)
+app.get('/admin/clear-all-cache', checkAdminAuth, async (req, res) => {
+    const result = await mongoCache.clearAllCache();
+    res.json(result);
+});
+
 app.use((req, res, next) => serverless(req, res, next));
 
 const port = process.env.PORT || 6907;
 const server = app.listen(port, () => {
     console.log(`Started addon at: http://127.0.0.1:${port}`);
+
     if (mongoCache?.isEnabled()) {
         mongoCache.initMongo().then(() => {
             console.log('[CACHE] MongoDB cache initialized');
