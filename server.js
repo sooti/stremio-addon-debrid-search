@@ -129,6 +129,13 @@ app.get('/admin/clear-search-cache', checkAdminAuth, async (req, res) => {
     res.json(result);
 });
 
+// Endpoint to clear MongoDB torrent hash cache (optionally for specific service)
+app.get('/admin/clear-torrent-cache', checkAdminAuth, async (req, res) => {
+    const service = req.query.service; // Optional: ?service=realdebrid or ?service=alldebrid
+    const result = await mongoCache.clearTorrentCache(service);
+    res.json(result);
+});
+
 // Endpoint to clear ALL MongoDB cache (search results + torrent metadata)
 app.get('/admin/clear-all-cache', checkAdminAuth, async (req, res) => {
     const result = await mongoCache.clearAllCache();
