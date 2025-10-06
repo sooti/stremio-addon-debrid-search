@@ -105,3 +105,4 @@ dist
 
 # VS-Code folder
 .vscode
+.aider*
