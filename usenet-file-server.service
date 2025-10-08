@@ -1,0 +1,24 @@
+[Unit]
+Description=Usenet File Server for Stremio Streaming
+After=network.target sabnzbd.service
+
+[Service]
+Type=simple
+User=sooti
+Group=sooti
+WorkingDirectory=/home/sooti/sootio-dev
+ExecStart=/usr/bin/python3 /home/sooti/sootio-dev/usenet_file_server.py /path/to/sabnzbd/complete --port 8081 --bind 0.0.0.0
+Restart=always
+RestartSec=10
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=usenet-file-server
+
+[Install]
+WantedBy=multi-user.target
