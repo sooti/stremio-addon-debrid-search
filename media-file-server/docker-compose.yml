@@ -16,7 +16,7 @@ services:
     security_opt:
       - apparmor:unconfined
     volumes:
-      - /home/sooti/Videos:/downloads:rw
+      - /path/to/your/downloads:/downloads:rw  # Change this to your download directory
     ports:
       - "3003:3003"
     environment:
@@ -37,31 +37,3 @@ services:
       retries: 3
       start_period: 30s
 
-  # Old server (backup - comment out after testing new server)
-  # usenet-server-old:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile
-  #   container_name: usenet-rar-server-old
-  #   privileged: true
-  #   cap_add:
-  #     - SYS_ADMIN
-  #   devices:
-  #     - /dev/fuse:/dev/fuse
-  #   security_opt:
-  #     - apparmor:unconfined
-  #   volumes:
-  #     - /home/sooti/Videos:/downloads:rw
-  #   ports:
-  #     - "3004:8081"  # Changed port to avoid conflict
-  #   environment:
-  #     - USENET_API_KEY=${USENET_API_KEY:-}
-  #   entrypoint: ["/bin/sh", "-c"]
-  #   command:
-  #     - |
-  #       if [ -n "$USENET_API_KEY" ]; then
-  #         exec python3 /app/usenet_file_server.py /downloads --port 8081 --bind 0.0.0.0 --api-key "$USENET_API_KEY"
-  #       else
-  #         exec python3 /app/usenet_file_server.py /downloads --port 8081 --bind 0.0.0.0
-  #       fi
-  #   restart: unless-stopped

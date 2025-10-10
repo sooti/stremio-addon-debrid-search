@@ -77,7 +77,7 @@ python3 fastapi_file_server.py /path/to/your/downloads \
 
 1. **Clone or navigate to the repository**
    ```bash
-   cd /path/to/tremio-addon-debrid-search//media-file-server
+   cd /path/to/stremio-addon-debrid-search/media-file-server
    ```
 
 2. **Create environment file** (optional)
@@ -126,7 +126,7 @@ services:
     security_opt:
       - apparmor:unconfined
     volumes:
-      - /home/sooti/Videos:/downloads:rw  # Change this to your download path
+      - /path/to/your/downloads:/downloads:rw  # Change this to your download directory
     ports:
       - "3003:3003"
     environment:
