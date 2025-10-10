@@ -77,7 +77,7 @@ python3 fastapi_file_server.py /path/to/your/downloads \
 
 1. **Clone or navigate to the repository**
    ```bash
-   cd /path/to/sootio-dev/media-file-server
+   cd /path/to/tremio-addon-debrid-search//media-file-server
    ```
 
 2. **Create environment file** (optional)
