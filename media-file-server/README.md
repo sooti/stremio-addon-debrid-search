@@ -22,20 +22,6 @@ Designed for Usenet downloads (SABnzbd integration) and personal media libraries
 
 ---
 
-## 📊 Performance Comparison
-
-| Feature | Old (ThreadingHTTPServer) | New (FastAPI + Uvicorn) |
-|---------|---------------------------|-------------------------|
-| Concurrent streams | ~10 | 100+ |
-| Range requests | Manual | Automatic |
-| Memory per stream | ~50MB | ~8KB (streaming) |
-| HTTP/2 support | ❌ | ✅ (with Hypercorn) |
-| Async I/O | ❌ | ✅ |
-| Connection pooling | ❌ | ✅ |
-| Error video caching | ❌ | ✅ (pre-generated) |
-
----
-
 ## 🚀 Quick Start
 
 ### Docker (Recommended)
