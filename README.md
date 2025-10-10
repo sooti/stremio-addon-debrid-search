@@ -37,10 +37,15 @@
 - 🚀 **Early Exit Optimization**  
   Stops searching as soon as enough high-quality results are found — faster responses, fewer wasted API calls.
 
-- ☁️ **Personal Cloud Search**  
+- ☁️ **Personal Cloud Search**
   Seamlessly integrates torrents from your Debrid cloud.
 
-- 🎬 **Accurate Year Filtering**  
+- 📡 **Usenet Streaming Support**
+  Direct integration with Newznab indexers and SABnzbd for progressive Usenet streaming.
+  Includes a zero-dependency Python file server for direct streaming (see `usenet_file_server.py`).
+  Personal cloud integration automatically marks your existing SABnzbd downloads with 💾 "Personal" label.
+
+- 🎬 **Accurate Year Filtering**
   Prevents mismatched torrents (wrong sequels/remakes) by cross-checking release years.
 
 ---

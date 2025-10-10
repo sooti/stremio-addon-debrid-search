@@ -1,0 +1,67 @@
+version: "3.9"
+
+services:
+  # FastAPI-based file server (production-ready, fixed config)
+  usenet-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.fastapi
+    image: usenet-file-server:fastapi
+    container_name: usenet-file-server
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse:/dev/fuse
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - /home/sooti/Videos:/downloads:rw
+    ports:
+      - "3003:3003"
+    environment:
+      - API_KEY=${USENET_API_KEY:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -n "$API_KEY" ]; then
+          exec python3 /app/fastapi_file_server.py /downloads --port 3003 --host 0.0.0.0 --workers 4 --api-key "$API_KEY"
+        else
+          exec python3 /app/fastapi_file_server.py /downloads --port 3003 --host 0.0.0.0 --workers 4
+        fi
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3003/health >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # Old server (backup - comment out after testing new server)
+  # usenet-server-old:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: usenet-rar-server-old
+  #   privileged: true
+  #   cap_add:
+  #     - SYS_ADMIN
+  #   devices:
+  #     - /dev/fuse:/dev/fuse
+  #   security_opt:
+  #     - apparmor:unconfined
+  #   volumes:
+  #     - /home/sooti/Videos:/downloads:rw
+  #   ports:
+  #     - "3004:8081"  # Changed port to avoid conflict
+  #   environment:
+  #     - USENET_API_KEY=${USENET_API_KEY:-}
+  #   entrypoint: ["/bin/sh", "-c"]
+  #   command:
+  #     - |
+  #       if [ -n "$USENET_API_KEY" ]; then
+  #         exec python3 /app/usenet_file_server.py /downloads --port 8081 --bind 0.0.0.0 --api-key "$USENET_API_KEY"
+  #       else
+  #         exec python3 /app/usenet_file_server.py /downloads --port 8081 --bind 0.0.0.0
+  #       fi
+  #   restart: unless-stopped

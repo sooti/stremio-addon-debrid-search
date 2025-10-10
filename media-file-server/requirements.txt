@@ -1,0 +1,21 @@
+# FastAPI File Server Dependencies
+
+# Core framework
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+
+# Async file I/O
+aiofiles==24.1.0
+
+# ASGI server options
+hypercorn==0.17.3  # Alternative to uvicorn with HTTP/2 support
+
+# Security
+python-multipart==0.0.12
+
+# Optional: Better JSON performance
+orjson==3.10.10
+
+# System utilities (already in Docker)
+# ffmpeg - for error video generation
+# rar2fs - for RAR archive mounting

@@ -25,6 +25,72 @@ const PENDING_RESOLVES = new Map();
 // Track active Usenet streams: nzoId -> { lastAccess, streamCount, config, videoFilePath, usenetConfig }
 const ACTIVE_USENET_STREAMS = new Map();
 
+/**
+ * Stream error video from Python server (proxy through Node)
+ * TVs and some video players don't follow 302 redirects, so we proxy instead
+ * @param {string} errorText - The error message to display
+ * @param {object} res - Express response object
+ * @param {string} fileServerUrl - Python file server URL
+ */
+async function redirectToErrorVideo(errorText, res, fileServerUrl) {
+    console.log(`[ERROR-VIDEO] Streaming error video: "${errorText}"`);
+
+    try {
+        const axios = (await import('axios')).default;
+
+        // URL-encode the error message
+        const encodedMessage = encodeURIComponent(errorText);
+
+        // Construct error video URL on Python server
+        const errorUrl = `${fileServerUrl.replace(/\/$/, '')}/error?message=${encodedMessage}`;
+
+        console.log(`[ERROR-VIDEO] Fetching from: ${errorUrl}`);
+
+        // Fetch the error video from Python server
+        const response = await axios({
+            method: 'GET',
+            url: errorUrl,
+            responseType: 'stream',
+            timeout: 30000
+        });
+
+        // Copy headers from Python server
+        res.status(200);
+        res.set('Content-Type', response.headers['content-type'] || 'video/mp4');
+        if (response.headers['content-length']) {
+            res.set('Content-Length', response.headers['content-length']);
+        }
+        res.set('Accept-Ranges', 'bytes');
+        res.set('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+
+        // Pipe the video stream to the client
+        // Note: pipe() automatically ends the response when the source stream ends
+        response.data.pipe(res);
+
+        // Log when streaming completes
+        response.data.on('end', () => {
+            console.log(`[ERROR-VIDEO] ✓ Finished streaming error video`);
+        });
+
+        // Handle errors during streaming
+        response.data.on('error', (err) => {
+            console.error(`[ERROR-VIDEO] Stream error: ${err.message}`);
+            if (!res.headersSent) {
+                res.status(500).end();
+            }
+        });
+
+    } catch (error) {
+        console.error(`[ERROR-VIDEO] Failed to fetch error video: ${error.message}`);
+        if (!res.headersSent) {
+            res.status(500).send(`Error: ${errorText}`);
+        }
+    }
+}
+
+// Note: Proxy requests removed - we now use direct 302 redirects to Python file server
+// This eliminates proxy overhead and allows proper client disconnect detection
+
 // Store Usenet configs globally (so auto-clean works even without active streams)
 const USENET_CONFIGS = new Map(); // fileServerUrl -> config
 
@@ -264,35 +330,39 @@ async function cleanupInactiveStreams() {
 
             // User stopped watching - delete the download if incomplete
             if (status.status === 'downloading' || status.status === 'Downloading' || status.status === 'Paused') {
-                console.log(`[USENET-CLEANUP] User stopped streaming, deleting incomplete download: ${nzoId} (${status.percentComplete?.toFixed(1)}%)`);
+                console.log(`[USENET-CLEANUP] User stopped streaming incomplete download: ${nzoId} (${status.percentComplete?.toFixed(1)}%)`);
 
-                // Delete download from SABnzbd
-                const deleted = await SABnzbd.deleteItem(
-                    streamInfo.config.sabnzbdUrl,
-                    streamInfo.config.sabnzbdApiKey,
-                    nzoId,
-                    true // Delete files
-                );
+                // Only delete if deleteOnStreamStop is enabled
+                if (shouldDeleteFile) {
+                    console.log(`[USENET-CLEANUP] deleteOnStreamStop enabled, deleting incomplete download and files`);
 
-                if (deleted) {
-                    console.log(`[USENET-CLEANUP] ✓ Deleted download and files: ${nzoId}`);
-                }
+                    // Delete download from SABnzbd
+                    const deleted = await SABnzbd.deleteItem(
+                        streamInfo.config.sabnzbdUrl,
+                        streamInfo.config.sabnzbdApiKey,
+                        nzoId,
+                        true // Delete files
+                    );
 
-                // Also delete from file server if configured
-                if (shouldDeleteFile && streamInfo.videoFilePath && streamInfo.usenetConfig?.fileServerUrl) {
-                    console.log(`[USENET-CLEANUP] Deleting file from file server: ${streamInfo.videoFilePath}`);
-                    await deleteFileFromServer(streamInfo.usenetConfig.fileServerUrl, streamInfo.videoFilePath);
+                    if (deleted) {
+                        console.log(`[USENET-CLEANUP] ✓ Deleted incomplete download and files: ${nzoId}`);
+                    }
+
+                    // Also delete from file server if configured
+                    if (streamInfo.videoFilePath && streamInfo.usenetConfig?.fileServerUrl) {
+                        console.log(`[USENET-CLEANUP] Deleting incomplete file from file server: ${streamInfo.videoFilePath}`);
+                        await deleteFileFromServer(streamInfo.usenetConfig.fileServerUrl, streamInfo.videoFilePath);
+                    }
+                } else {
+                    console.log(`[USENET-CLEANUP] deleteOnStreamStop disabled, keeping incomplete download`);
                 }
 
                 ACTIVE_USENET_STREAMS.delete(nzoId);
             } else if (status.status === 'completed') {
                 console.log(`[USENET-CLEANUP] Download completed: ${nzoId}`);
-
-                // Delete file from file server if configured
-                if (shouldDeleteFile && streamInfo.videoFilePath && streamInfo.usenetConfig?.fileServerUrl) {
-                    console.log(`[USENET-CLEANUP] deleteOnStreamStop enabled, deleting file from server`);
-                    await deleteFileFromServer(streamInfo.usenetConfig.fileServerUrl, streamInfo.videoFilePath);
-                }
+                // DO NOT delete completed files - they become "personal" files for instant playback
+                // They will be cleaned up by autoCleanOldFiles after the configured age (default 7 days)
+                console.log(`[USENET-CLEANUP] Keeping completed file (will auto-clean after ${streamInfo.usenetConfig?.autoCleanAgeDays || 7} days if enabled)`);
 
                 // Remove from tracking
                 ACTIVE_USENET_STREAMS.delete(nzoId);
@@ -343,7 +413,16 @@ async function autoCleanOldFiles() {
 
             // Get list of files from file server
             const axios = (await import('axios')).default;
-            const response = await axios.get(`${fileServerUrl.replace(/\/$/, '')}/api/list`, { timeout: 10000 });
+            const headers = {};
+            // Use fileServerPassword from config if available, otherwise use env variable
+            const apiKey = config?.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
+            if (apiKey) {
+                headers['X-API-Key'] = apiKey;
+            }
+            const response = await axios.get(`${fileServerUrl.replace(/\/$/, '')}/api/list`, {
+                timeout: 10000,
+                headers: headers
+            });
 
             if (!response.data?.files) {
                 console.log(`[USENET-AUTO-CLEAN] No files found on ${fileServerUrl}`);
@@ -354,11 +433,16 @@ async function autoCleanOldFiles() {
             let deletedCount = 0;
 
             for (const file of files) {
+                // Only delete COMPLETED files (not incomplete/in-progress downloads)
+                if (!file.isComplete) {
+                    continue; // Skip incomplete files
+                }
+
                 const fileAgeMs = now - (file.modified * 1000); // Convert to milliseconds
 
                 if (fileAgeMs > ageThresholdMs) {
                     const ageDaysActual = Math.round(fileAgeMs / (24 * 60 * 60 * 1000));
-                    console.log(`[USENET-AUTO-CLEAN] File is ${ageDaysActual} days old, deleting: ${file.path}`);
+                    console.log(`[USENET-AUTO-CLEAN] Completed file is ${ageDaysActual} days old, deleting: ${file.path}`);
 
                     const deleted = await deleteFileFromServer(fileServerUrl, file.path);
                     if (deleted) {
@@ -537,6 +621,137 @@ setTimeout(() => {
 }, 10 * 1000);
 
 // Helper function to find video file in directory (including incomplete)
+// Find video file via file server API (uses rar2fs mounted directory)
+async function findVideoFileViaAPI(fileServerUrl, releaseName, options = {}, fileServerPassword = null) {
+    try {
+        const axios = (await import('axios')).default;
+        console.log(`[USENET] Querying file server for release: ${releaseName}`);
+
+        const headers = {};
+        const apiKey = fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
+        if (apiKey) {
+            headers['X-API-Key'] = apiKey;
+        }
+        const response = await axios.get(`${fileServerUrl.replace(/\/$/, '')}/api/list`, {
+            timeout: 5000,
+            validateStatus: (status) => status === 200,
+            headers: headers
+        });
+
+        if (!response.data?.files || !Array.isArray(response.data.files)) {
+            console.log('[USENET] No files returned from file server');
+            return null;
+        }
+
+        console.log(`[USENET] File server returned ${response.data.files.length} total video files`);
+
+        // Filter files that match the release name (normalize the folder path)
+        const normalizedRelease = releaseName.toLowerCase();
+        let matchingFiles = response.data.files.filter(file => {
+            if (!file || !file.path) {
+                console.log(`[USENET] Warning: Invalid file entry in response`);
+                return false;
+            }
+            const filePath = file.path.toLowerCase();
+            const fileName = file.name ? file.name.toLowerCase() : '';
+
+            // Match if path contains release name OR filename contains release name
+            // This helps find files in nested subdirectories
+            const pathMatch = filePath.includes(normalizedRelease);
+            const nameMatch = fileName.includes(normalizedRelease);
+
+            return pathMatch || nameMatch;
+        });
+
+        console.log(`[USENET] Found ${matchingFiles.length} files matching release "${releaseName}"`);
+
+        // Debug: show paths of all matching files
+        if (matchingFiles.length > 0) {
+            console.log(`[USENET] Matching file paths:`, matchingFiles.slice(0, 5).map(f => f.path));
+            console.log(`[USENET] First match:`, JSON.stringify(matchingFiles[0]));
+        } else {
+            // Show what we got from API to debug why nothing matched
+            console.log(`[USENET] No matches found. Sample of files from API (first 3):`);
+            response.data.files.slice(0, 3).forEach(f => {
+                console.log(`  - Path: "${f.path}" | Name: "${f.name}"`);
+            });
+            console.log(`[USENET] Looking for release: "${normalizedRelease}"`);
+        }
+
+        if (matchingFiles.length === 0) {
+            return null;
+        }
+
+        // Exclude sample files, extras, and featurettes
+        matchingFiles = matchingFiles.filter(f => {
+            if (!f || !f.name) return false;
+            const nameLower = f.name.toLowerCase();
+            const pathLower = f.path ? f.path.toLowerCase() : '';
+
+            // Exclude common non-main-feature files
+            const excludeKeywords = ['sample', 'extra', 'featurette', 'deleted', 'trailer', 'bonus'];
+            const shouldExclude = excludeKeywords.some(keyword =>
+                nameLower.includes(keyword) || pathLower.includes(keyword)
+            );
+
+            if (shouldExclude) {
+                console.log(`[USENET] Excluding: ${f.name} (contains ${excludeKeywords.find(k => nameLower.includes(k) || pathLower.includes(k))})`);
+            }
+
+            return !shouldExclude;
+        });
+
+        if (matchingFiles.length === 0) {
+            console.log(`[USENET] No files left after filtering non-main-feature files`);
+            return null;
+        }
+
+        console.log(`[USENET] ${matchingFiles.length} files after filtering (showing sizes):`);
+        matchingFiles.slice(0, 5).forEach(f => {
+            console.log(`  - ${f.name}: ${(f.size / 1024 / 1024 / 1024).toFixed(2)} GB`);
+        });
+
+        // For series, try to match season/episode
+        if (options.season && options.episode) {
+            const PTT = (await import('./lib/util/parse-torrent-title.js')).default;
+            const matchedFile = matchingFiles.find(file => {
+                const parsed = PTT.parse(file.name);
+                return parsed.season === Number(options.season) && parsed.episode === Number(options.episode);
+            });
+            if (matchedFile) {
+                console.log(`[USENET] Matched S${options.season}E${options.episode}: ${matchedFile.name}`);
+                return {
+                    name: matchedFile.name,
+                    path: matchedFile.path, // Use full path with folder
+                    size: matchedFile.size
+                };
+            }
+        }
+
+        // Return largest file
+        matchingFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
+        const largestFile = matchingFiles[0];
+
+        if (!largestFile || !largestFile.name) {
+            console.log(`[USENET] Error: largest file is invalid`);
+            return null;
+        }
+
+        console.log(`[USENET] Selected largest file: ${largestFile.name} (${(largestFile.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
+
+        // Use full path with folder so rar2fs can find the extracted file
+        return {
+            name: largestFile.name,
+            path: largestFile.path, // Use full path, not flatPath
+            size: largestFile.size
+        };
+
+    } catch (error) {
+        console.error('[USENET] Error querying file server:', error.message);
+        return null;
+    }
+}
+
 async function findVideoFile(baseDir, fileName, options = {}) {
     const videoExtensions = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg'];
 
@@ -554,15 +769,26 @@ async function findVideoFile(baseDir, fileName, options = {}) {
             }
         }
 
-        // Search in directory
+        // Search in directory recursively
         const files = fs.readdirSync(baseDir, { withFileTypes: true, recursive: true });
 
         // Filter video files and exclude samples
+        // Note: with recursive: true, dirent.name contains the relative path from baseDir
         let videoFiles = files
             .filter(f => f.isFile())
-            .map(f => path.join(baseDir, f.name))
+            .map(f => {
+                // f.path is the parent directory, f.name is the filename (or relative path with recursive)
+                // Join them correctly to get the full path
+                const fullPath = path.join(f.path || baseDir, f.name);
+                return fullPath;
+            })
             .filter(p => videoExtensions.includes(path.extname(p).toLowerCase()))
             .filter(p => !path.basename(p).toLowerCase().includes('sample')); // Exclude sample files
+
+        console.log(`[USENET] Found ${videoFiles.length} video files in ${baseDir}`);
+        if (videoFiles.length > 0) {
+            console.log('[USENET] Video files:', videoFiles.map(f => path.basename(f)).join(', '));
+        }
 
         if (videoFiles.length === 0) {
             return null;
@@ -777,6 +1003,12 @@ app.get('/usenet/personal/*', async (req, res) => {
             headers['Range'] = req.headers.range;
         }
 
+        // Add API key for file server authentication
+        const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
+        if (apiKey) {
+            headers['X-API-Key'] = apiKey;
+        }
+
         const response = await axios.get(proxyUrl, {
             headers,
             responseType: 'stream',
@@ -874,24 +1106,44 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                 nzoId = existing.nzoId;
                 console.log(`[USENET] Found existing download in ${existing.location}: ${nzoId} (${existing.status})`);
 
-                // Add to our memory cache
-                Usenet.activeDownloads.set(nzoId, {
-                    nzoId: nzoId,
-                    name: decodedTitle,
-                    startTime: Date.now(),
-                    status: existing.status
-                });
+                // If it's completed, verify the files actually exist
+                if (existing.status === 'completed') {
+                    const status = await SABnzbd.getDownloadStatus(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId);
+                    if (status.path && !fs.existsSync(status.path)) {
+                        console.log(`[USENET] ⚠️  Completed download folder missing: ${status.path}`);
+                        console.log(`[USENET] Deleting stale history entry and re-downloading...`);
 
-                // Delete all other downloads to prioritize this existing stream
-                console.log('[USENET] Deleting all other downloads to prioritize existing stream...');
-                const deletedCount = await SABnzbd.deleteAllExcept(
-                    config.sabnzbdUrl,
-                    config.sabnzbdApiKey,
-                    nzoId,
-                    true // Delete files
-                );
-                if (deletedCount > 0) {
-                    console.log(`[USENET] ✓ Deleted ${deletedCount} other download(s)`);
+                        // Delete from history
+                        await SABnzbd.deleteItem(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId, false);
+                        nzoId = null; // Reset so we re-download below
+                    }
+                }
+
+                if (nzoId) {
+                    // Add to our memory cache
+                    Usenet.activeDownloads.set(nzoId, {
+                        nzoId: nzoId,
+                        name: decodedTitle,
+                        startTime: Date.now(),
+                        status: existing.status
+                    });
+
+                    // Only delete other INCOMPLETE downloads if this is still downloading
+                    // Don't delete anything if this is already completed
+                    if (existing.status === 'downloading' || existing.status === 'Downloading' || existing.status === 'Paused') {
+                        console.log('[USENET] Deleting other incomplete downloads to prioritize existing stream...');
+                        const deletedCount = await SABnzbd.deleteAllExcept(
+                            config.sabnzbdUrl,
+                            config.sabnzbdApiKey,
+                            nzoId,
+                            true // Delete files
+                        );
+                        if (deletedCount > 0) {
+                            console.log(`[USENET] ✓ Deleted ${deletedCount} other download(s)`);
+                        }
+                    } else {
+                        console.log('[USENET] Existing download is completed, keeping all other downloads');
+                    }
                 }
             }
         }
@@ -920,19 +1172,58 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
             if (deletedCount > 0) {
                 console.log(`[USENET] ✓ Deleted ${deletedCount} other download(s) to prioritize this stream`);
             }
+
+            // Don't delete completed folders - they become personal files for instant playback
+            // Auto-clean will handle old files based on user settings
+            console.log(`[USENET] Keeping all completed folders (personal files)`);
+
         }
 
-        // Wait for download to start (just 3% to ensure it's actually downloading)
-        console.log('[USENET] Waiting for download to start...');
-        let status = await Usenet.waitForStreamingReady(
-            config.sabnzbdUrl,
-            config.sabnzbdApiKey,
-            nzoId,
-            3, // 3% minimum - just ensure download has started
-            60000 // 1 minute max wait for download to start
-        );
+        // Check current download status
+        let status = await SABnzbd.getDownloadStatus(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId);
+
+        // Only wait if download hasn't reached 5% yet
+        if ((status.percentComplete || 0) < 5 && status.status !== 'completed') {
+            console.log('[USENET] Waiting for download to start...');
+            try {
+                status = await Usenet.waitForStreamingReady(
+                    config.sabnzbdUrl,
+                    config.sabnzbdApiKey,
+                    nzoId,
+                    5, // 5% minimum - ensure enough data for initial streaming
+                    60000 // 1 minute max wait for download to start
+                );
+            } catch (error) {
+                console.log(`[USENET] Download failed or timed out: ${error.message}`);
+
+                // Delete the failed download
+                try {
+                    await SABnzbd.deleteItem(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId, true);
+                    console.log(`[USENET] Deleted failed download: ${nzoId}`);
+                } catch (deleteError) {
+                    console.log(`[USENET] Could not delete failed download: ${deleteError.message}`);
+                }
+
+                // Return error video
+                const fileServerUrl = config.fileServerUrl || process.env.USENET_FILE_SERVER_URL;
+                if (fileServerUrl) {
+                    let errorMessage = 'Download failed or timed out';
+                    if (error.message.includes('Aborted')) {
+                        errorMessage = 'Download failed - file incomplete or missing from Usenet servers';
+                    } else if (error.message.includes('Timeout')) {
+                        errorMessage = 'Download timed out - file may be missing or too slow';
+                    }
+                    return redirectToErrorVideo(errorMessage, res, fileServerUrl);
+                } else {
+                    return res.status(500).send(error.message);
+                }
+            }
+        } else {
+            console.log(`[USENET] Download already at ${status.percentComplete?.toFixed(1)}%, skipping wait`);
+        }
 
         let videoFilePath = null;
+        let videoFileSize = 0; // Track file size from API
 
         // Get SABnzbd config to find the incomplete directory
         const sabnzbdConfig = await SABnzbd.getConfig(config.sabnzbdUrl, config.sabnzbdApiKey);
@@ -942,6 +1233,75 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
         });
 
         let searchPath = null;
+
+        // Check if using file server API (for archivemount mounted directory) - declare outside loop
+        const fileServerUrl = config.fileServerUrl || process.env.USENET_FILE_SERVER_URL;
+
+        // Extract actual folder name from status (SABnzbd may append .1, .2 etc if folder exists)
+        // Use basename of incompletePath if available, otherwise use status.name
+        let actualFolderName = decodedTitle;
+        if (status.incompletePath) {
+            actualFolderName = path.basename(status.incompletePath);
+            console.log(`[USENET] Using actual folder name from SABnzbd: ${actualFolderName}`);
+        } else if (status.name) {
+            actualFolderName = status.name;
+            console.log(`[USENET] Using folder name from status: ${actualFolderName}`);
+        }
+
+        // Check for 7z archives ONCE before the wait loop (if using file server)
+        let checked7z = false;
+        if (fileServerUrl) {
+            try {
+                const axios = (await import('axios')).default;
+                const headers = {};
+                const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
+                if (apiKey) {
+                    headers['X-API-Key'] = apiKey;
+                }
+
+                const checkUrl = `${fileServerUrl.replace(/\/$/, '')}/api/check-archives?folder=${encodeURIComponent(actualFolderName)}`;
+                console.log(`[USENET] Checking for 7z archives: ${checkUrl}`);
+
+                const checkResult = await axios.get(checkUrl, {
+                    timeout: 5000,
+                    headers: headers,
+                    validateStatus: (status) => status === 200 || status === 404 || status === 400
+                });
+
+                checked7z = true;
+
+                console.log(`[USENET] Archive check result:`, JSON.stringify(checkResult.data));
+
+                if (checkResult.status === 200 && checkResult.data?.has7z) {
+                    console.log(`[USENET] ❌ 7z archive detected - NOT SUPPORTED`);
+                    console.log(`[USENET] Deleting download: ${nzoId}`);
+
+                    // Delete the download
+                    await SABnzbd.deleteItem(
+                        config.sabnzbdUrl,
+                        config.sabnzbdApiKey,
+                        nzoId,
+                        true // Delete files
+                    );
+
+                    // Redirect to error video on Python server
+                    return redirectToErrorVideo(
+                        '7z archives are not supported. Only RAR archives and direct video files are supported. Download has been removed.',
+                        res,
+                        fileServerUrl
+                    );
+                } else if (checkResult.status === 200 && checkResult.data?.found === false) {
+                    console.log(`[USENET] Folder not found yet, will check again in loop if needed`);
+                    checked7z = false; // Allow retry since folder doesn't exist yet
+                }
+            } catch (e) {
+                console.log(`[USENET] Could not check for 7z archives: ${e.message}`);
+                if (e.response) {
+                    console.log(`[USENET] Response status: ${e.response.status}, data:`, e.response.data);
+                }
+                checked7z = true; // Don't retry on error
+            }
+        }
 
         // Wait for video file to be extracted - poll more frequently for faster streaming
         const maxWaitForFile = 120000; // 2 minutes max
@@ -961,49 +1321,88 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                 // Log what we're checking
                 console.log(`[USENET] Checking for video file in: ${searchPath}`);
 
-                // Check for _UNPACK_ folder in the MAIN download directory (not incomplete)
-                // SABnzbd extracts files to _UNPACK_ folder in the complete directory during download
-                let unpackPath = null;
-                if (sabnzbdConfig?.downloadDir) {
-                    try {
-                        console.log(`[USENET] Searching for _UNPACK_ folder in main download dir: ${sabnzbdConfig.downloadDir}`);
-                        const mainDirContents = fs.readdirSync(sabnzbdConfig.downloadDir);
+                // Look for release name folder in incomplete directory
+                // RAR files are mounted transparently via archivemount python server
 
-                        // Find _UNPACK_ folder that matches this download
-                        const unpackFolder = mainDirContents.find(f => {
-                            if (!f.startsWith('_UNPACK_')) return false;
-                            // Try to match the download name (first few parts)
-                            const nameParts = decodedTitle.split('.').slice(0, 3).join('.');
-                            return f.includes(nameParts) || f.replace('_UNPACK_', '').startsWith(nameParts);
-                        });
+                if (fileServerUrl) {
+                    // Query the file server API directly (don't check local filesystem)
+                    // The file server has its own filesystem access and rar2fs mounting
 
-                        if (unpackFolder) {
-                            unpackPath = path.join(sabnzbdConfig.downloadDir, unpackFolder);
-                            console.log(`[USENET] Found _UNPACK_ folder in main download dir: ${unpackPath}`);
-                        } else {
-                            console.log(`[USENET] No _UNPACK_ folder found yet in main download dir`);
+                    // Check for 7z if we haven't checked yet (folder wasn't created on first check)
+                    if (!checked7z) {
+                        try {
+                            const axios = (await import('axios')).default;
+                            const headers = {};
+                            const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
+                            if (apiKey) {
+                                headers['X-API-Key'] = apiKey;
+                            }
+
+                            const checkUrl = `${fileServerUrl.replace(/\/$/, '')}/api/check-archives?folder=${encodeURIComponent(actualFolderName)}`;
+                            const checkResult = await axios.get(checkUrl, {
+                                timeout: 5000,
+                                headers: headers,
+                                validateStatus: (status) => status === 200 || status === 404 || status === 400
+                            });
+
+                            if (checkResult.status === 200 && checkResult.data?.found) {
+                                checked7z = true; // Found the folder, don't check again
+                                console.log(`[USENET] Archive check result:`, JSON.stringify(checkResult.data));
+
+                                if (checkResult.data.has7z) {
+                                    console.log(`[USENET] ❌ 7z archive detected - NOT SUPPORTED`);
+                                    console.log(`[USENET] Deleting download: ${nzoId}`);
+
+                                    // Delete the download
+                                    await SABnzbd.deleteItem(
+                                        config.sabnzbdUrl,
+                                        config.sabnzbdApiKey,
+                                        nzoId,
+                                        true // Delete files
+                                    );
+
+                                    // Redirect to error video on Python server
+                                    return redirectToErrorVideo(
+                                        '7z archives are not supported. Only RAR archives and direct video files are supported. Download has been removed.',
+                                        res,
+                                        fileServerUrl
+                                    );
+                                }
+                            }
+                        } catch (e) {
+                            console.log(`[USENET] Could not check for 7z archives in loop: ${e.message}`);
+                            checked7z = true; // Don't retry on error
                         }
-                    } catch (e) {
-                        console.log(`[USENET] Could not list main download directory: ${e.message}`);
                     }
-                }
 
-                // Try the _UNPACK_ folder first (this is where SABnzbd extracts during download)
-                if (unpackPath && fs.existsSync(unpackPath)) {
-                    console.log(`[USENET] Checking _UNPACK_ folder for video file...`);
-                    videoFilePath = await findVideoFile(
-                        unpackPath,
+                    const fileInfo = await findVideoFileViaAPI(
+                        fileServerUrl,
                         decodedTitle,
-                        type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {}
+                        type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+                        config.fileServerPassword
                     );
-                    if (videoFilePath) {
-                        console.log('[USENET] Found video file in _UNPACK_ folder:', videoFilePath);
-                        break; // Exit the waiting loop
-                    }
-                }
+                    if (fileInfo) {
+                        // File server returns { name, path, size }
+                        // Python API returns paths relative to its working directory,
+                        // but sometimes includes 'incomplete/' prefix - strip it if present
+                        let cleanPath = fileInfo.path;
+                        if (cleanPath.startsWith('incomplete/')) {
+                            cleanPath = cleanPath.substring('incomplete/'.length);
+                        }
+                        if (cleanPath.startsWith('personal/')) {
+                            cleanPath = cleanPath.substring('personal/'.length);
+                        }
 
-                // Try the regular download folder
-                if (searchPath && fs.existsSync(searchPath)) {
+                        // Construct the URL for the file server
+                        videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${cleanPath}`;
+                        videoFileSize = fileInfo.size; // Store the file size for tracking
+                        console.log('[USENET] Found video file via API:', videoFilePath);
+                        break; // Exit the waiting loop
+                    } else {
+                        console.log(`[USENET] Video file not found yet via API. Progress: ${status.percentComplete?.toFixed(1) || 0}%`);
+                    }
+                } else if (searchPath && fs.existsSync(searchPath)) {
+                    // Fallback to direct filesystem search (no rar2fs)
                     // List what's in the directory
                     let files = [];
                     try {
@@ -1021,52 +1420,41 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                     if (videoFilePath) {
                         console.log('[USENET] Found video file in download folder:', videoFilePath);
                         break; // Exit the waiting loop
-                    } else {
-                        // Check for 7z files - NOT supported for streaming
-                        // Match .7z or .7z.001, .7z.002, etc. (split archives)
-                        const has7zFiles = files.some(f => {
-                            const lower = f.toLowerCase();
-                            return lower.endsWith('.7z') || lower.match(/\.7z\.\d+$/);
-                        });
-                        if (has7zFiles) {
-                            console.log('[USENET] ❌ 7z archive detected - not supported for streaming');
-                            console.log('[USENET] Found 7z files:', files.filter(f => {
-                                const lower = f.toLowerCase();
-                                return lower.endsWith('.7z') || lower.match(/\.7z\.\d+$/);
-                            }).slice(0, 3).join(', '));
-
-                            // Delete the download immediately
-                            await SABnzbd.deleteItem(
-                                config.sabnzbdUrl,
-                                config.sabnzbdApiKey,
-                                nzoId,
-                                true // Delete files
-                            );
-                            console.log('[USENET] ✓ Deleted 7z download from SABnzbd');
-
-                            return res.status(400).send(
-                                `❌ 7z archives are not supported for streaming.\n\n` +
-                                `This release uses 7z compression which cannot be streamed.\n` +
-                                `SABnzbd's Direct Unpack does not support 7z files.\n\n` +
-                                `The download has been stopped and deleted.\n\n` +
-                                `Please select a different release that uses RAR or is uncompressed.`
-                            );
-                        }
-
-                        // Check if we see RAR files (indicates files are still being extracted)
-                        const hasRarFiles = files.some(f =>
-                            f.toLowerCase().endsWith('.rar') ||
-                            f.toLowerCase().match(/\.r\d+$/) ||
-                            f.toLowerCase().endsWith('.zip')
-                        );
-                        if (hasRarFiles && !unpackPath) {
-                            console.log('[USENET] ⚠️ RAR/ZIP archives detected but no _UNPACK_ folder found');
-                            console.log('[USENET] Direct Unpack may be disabled in SABnzbd');
-                        } else {
-                            console.log('[USENET] No video file found yet, extraction may still be in progress');
-                        }
                     }
-                } else {
+                }
+
+                if (!videoFilePath && !fileServerUrl && searchPath && fs.existsSync(searchPath)) {
+                    // Only check for 7z if we're not using file server
+                    let files = [];
+                    try {
+                        files = fs.readdirSync(searchPath);
+                    } catch (e) {
+                        console.log(`[USENET] Could not list directory: ${e.message}`);
+                    }
+
+                    // Check for 7z files - NOT SUPPORTED
+                    const has7zFiles = files.some(f => {
+                        const lower = f.toLowerCase();
+                        return lower.endsWith('.7z') || lower.match(/\.7z\.\d+$/);
+                    });
+                    if (has7zFiles) {
+                        console.log('[USENET] ⚠️ 7z archive detected - not supported (only RAR and direct video files)');
+                    }
+
+                    // Check if we see RAR files (rar2fs will mount them transparently)
+                    const hasRarFiles = files.some(f =>
+                        f.toLowerCase().endsWith('.rar') ||
+                        f.toLowerCase().match(/\.r\d+$/) ||
+                        f.toLowerCase().endsWith('.zip')
+                    );
+                    if (hasRarFiles) {
+                        console.log('[USENET] ⚠️ RAR/ZIP archives detected - waiting for rar2fs to mount them');
+                    } else {
+                        console.log('[USENET] No video file found yet, download may still be in progress');
+                    }
+                }
+
+                if (!videoFilePath && !fileServerUrl && !fs.existsSync(searchPath)) {
                     console.log(`[USENET] Path does not exist yet: ${searchPath}`);
                 }
             }
@@ -1074,13 +1462,47 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
             // If complete, get from complete folder
             if (status.status === 'completed' && status.path) {
                 console.log('[USENET] Download completed, looking in complete folder:', status.path);
-                videoFilePath = await findVideoFile(
-                    status.path,
-                    decodedTitle,
-                    type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {}
-                );
-                if (videoFilePath) {
-                    break; // Exit the waiting loop
+
+                // Check if there are RAR files - use file server API with rar2fs
+                const hasRarFiles = fs.existsSync(status.path) &&
+                    fs.readdirSync(status.path).some(f => f.toLowerCase().match(/\.(rar|r\d+)$/));
+
+                if (hasRarFiles && fileServerUrl) {
+                    console.log('[USENET] Completed RAR archive detected, using file server API with rar2fs');
+                    const fileInfo = await findVideoFileViaAPI(
+                        fileServerUrl,
+                        decodedTitle,
+                        type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+                        config.fileServerPassword
+                    );
+                    if (fileInfo) {
+                        // File server returns { name, path, size }
+                        // Python API returns paths relative to its working directory,
+                        // but sometimes includes 'incomplete/' or 'personal/' prefix - strip it if present
+                        let cleanPath = fileInfo.path;
+                        if (cleanPath.startsWith('incomplete/')) {
+                            cleanPath = cleanPath.substring('incomplete/'.length);
+                        }
+                        if (cleanPath.startsWith('personal/')) {
+                            cleanPath = cleanPath.substring('personal/'.length);
+                        }
+
+                        videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${cleanPath}`;
+                        videoFileSize = fileInfo.size;
+                        console.log('[USENET] Found video file via API (completed):', videoFilePath);
+                        break; // Exit the waiting loop
+                    }
+                } else {
+                    // Direct video file (no RAR) - use filesystem
+                    videoFilePath = await findVideoFile(
+                        status.path,
+                        decodedTitle,
+                        type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {}
+                    );
+                    if (videoFilePath) {
+                        console.log('[USENET] Found direct video file (completed):', videoFilePath);
+                        break; // Exit the waiting loop
+                    }
                 }
             }
 
@@ -1091,65 +1513,63 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
 
             // Check for failures
             if (status.status === 'error' || status.status === 'failed') {
-                return res.status(500).send(`Download failed: ${status.error || status.failMessage || 'Unknown error'}`);
+                const errorMsg = `Download failed: ${status.error || status.failMessage || 'Unknown error'}`;
+                console.log(`[USENET] ${errorMsg}`);
+                const fileServerUrl = config.fileServerUrl || process.env.USENET_FILE_SERVER_URL;
+                if (!fileServerUrl) {
+                    return res.status(500).send(errorMsg);
+                }
+                return redirectToErrorVideo(errorMsg, res, fileServerUrl);
             }
         }
 
-        if (!videoFilePath || !fs.existsSync(videoFilePath)) {
+        // Check if videoFilePath is a URL or local file
+        // fileServerUrl already declared above
+        const isUrl = videoFilePath && (videoFilePath.startsWith('http://') || videoFilePath.startsWith('https://'));
+        const fileExists = isUrl ? true : (videoFilePath && fs.existsSync(videoFilePath));
+
+        if (!videoFilePath || !fileExists) {
             // File still not ready after waiting
             console.log('[USENET] Video file not found after waiting.');
             console.log('[USENET] Status:', status.status, 'Progress:', status.percentComplete + '%');
             console.log('[USENET] Searched path:', searchPath);
 
-            // Check if we found RAR files but no video file at high completion percentage
-            let directUnpackWarning = '';
+            // Check if we found 7z files - NOT supported
             if (searchPath && fs.existsSync(searchPath)) {
                 try {
                     const files = fs.readdirSync(searchPath);
 
-                    // Check for 7z files - NOT supported
-                    // Match .7z or .7z.001, .7z.002, etc. (split archives)
+                    // Check for 7z files - NOT SUPPORTED
                     const has7zFiles = files.some(f => {
                         const lower = f.toLowerCase();
                         return lower.endsWith('.7z') || lower.match(/\.7z\.\d+$/);
                     });
                     if (has7zFiles) {
-                        console.log('[USENET] ❌ 7z archive detected - not supported for streaming');
+                        console.log('[USENET] ❌ 7z archive detected - NOT SUPPORTED');
                         console.log('[USENET] Found 7z files:', files.filter(f => {
                             const lower = f.toLowerCase();
                             return lower.endsWith('.7z') || lower.match(/\.7z\.\d+$/);
                         }).slice(0, 3).join(', '));
+                        console.log(`[USENET] Deleting download: ${nzoId}`);
 
-                        // Delete the download immediately
+                        // Delete the download
                         await SABnzbd.deleteItem(
                             config.sabnzbdUrl,
                             config.sabnzbdApiKey,
                             nzoId,
                             true // Delete files
                         );
-                        console.log('[USENET] ✓ Deleted 7z download from SABnzbd');
 
-                        return res.status(400).send(
-                            `❌ 7z archives are not supported for streaming.\n\n` +
-                            `This release uses 7z compression which cannot be streamed.\n` +
-                            `SABnzbd's Direct Unpack does not support 7z files.\n\n` +
-                            `The download has been stopped and deleted.\n\n` +
-                            `Please select a different release that uses RAR or is uncompressed.`
+                        // Redirect to error video on Python server
+                        const fileServerUrl = config.fileServerUrl || process.env.USENET_FILE_SERVER_URL;
+                        if (!fileServerUrl) {
+                            return res.status(400).send('7z archives are not supported. Only RAR archives and direct video files are supported. Download has been removed.');
+                        }
+                        return redirectToErrorVideo(
+                            '7z archives are not supported. Only RAR archives and direct video files are supported. Download has been removed.',
+                            res,
+                            fileServerUrl
                         );
-                    }
-
-                    const hasRarFiles = files.some(f =>
-                        f.toLowerCase().endsWith('.rar') ||
-                        f.toLowerCase().match(/\.r\d+$/)
-                    );
-                    if (hasRarFiles && status.percentComplete > 50) {
-                        directUnpackWarning = '\n\n⚠️ RAR archives detected. If you have NOT enabled "Direct Unpack" in SABnzbd, ' +
-                            'streaming will only work after 100% download.\n\n' +
-                            'To enable progressive streaming:\n' +
-                            '1. Open SABnzbd Web UI\n' +
-                            '2. Go to Config → Switches\n' +
-                            '3. Enable "Direct Unpack"\n' +
-                            '4. Save and retry';
                     }
                 } catch (e) {
                     // Ignore errors
@@ -1158,16 +1578,60 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
 
             return res.status(202).send(
                 `Download in progress: ${status.percentComplete?.toFixed(1) || 0}%. ` +
-                `Video file not yet extracted. SABnzbd is still extracting the files. Please try again in a moment.` +
-                directUnpackWarning
+                `Video file not yet available via rar2fs. Please try again in a moment.`
             );
         }
 
         console.log('[USENET] Streaming from:', videoFilePath);
 
         // Check if external file server is configured - if so, skip range checks and redirect immediately
-        const fileServerUrl = config.fileServerUrl || process.env.USENET_FILE_SERVER_URL;
-        const usingFileServer = !!fileServerUrl;
+        const fileServerUrl2 = config.fileServerUrl || process.env.USENET_FILE_SERVER_URL;
+        const usingFileServer = !!fileServerUrl2;
+
+        // Check if videoFilePath is already a URL (from API query)
+        const videoPathIsUrl = videoFilePath && (videoFilePath.startsWith('http://') || videoFilePath.startsWith('https://'));
+
+        // If videoFilePath is already a URL, redirect to Python file server directly
+        if (videoPathIsUrl) {
+            console.log(`[USENET] Redirecting to Python file server: ${videoFilePath}`);
+
+            // Track stream access
+            if (!ACTIVE_USENET_STREAMS.has(nzoId)) {
+                ACTIVE_USENET_STREAMS.set(nzoId, {
+                    videoFilePath: videoFilePath,
+                    downloadPercent: status.percentComplete || 0,
+                    streamCount: 1,
+                    startTime: Date.now(),
+                    lastAccess: Date.now(),
+                    estimatedFileSize: videoFileSize, // File size from API
+                    lastDownloadPercent: status.percentComplete || 0,
+                    config: config, // Store config for monitoring
+                    paused: false,
+                    fileSize: videoFileSize, // File size from API
+                    lastPlaybackPosition: 0
+                });
+            } else {
+                const streamInfo = ACTIVE_USENET_STREAMS.get(nzoId);
+                streamInfo.lastAccess = Date.now();
+                streamInfo.streamCount++;
+                streamInfo.lastDownloadPercent = status.percentComplete || 0;
+            }
+
+            // Add API key for file server authentication
+            const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
+            if (apiKey) {
+                // Append as query parameter for direct streaming support
+                const separator = videoFilePath.includes('?') ? '&' : '?';
+                videoFilePath = `${videoFilePath}${separator}key=${apiKey}`;
+            }
+
+            console.log(`[USENET] Direct stream URL: ${videoFilePath}`);
+            console.log(`[USENET] 🔀 Sending 302 redirect to client - client will connect directly to Python server`);
+
+            // Return 302 redirect to Python file server
+            // Client (VLC/Stremio) will connect directly to Python server
+            return res.redirect(302, videoFilePath);
+        }
 
         // Check if user is trying to resume from middle (Range request)
         // Skip this check if using file server - let file server handle ranges
@@ -1345,11 +1809,11 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
             // Track stream access before redirecting
             if (!ACTIVE_USENET_STREAMS.has(nzoId)) {
                 const currentFileSize = fs.statSync(videoFilePath).size;
-                const isBeingExtracted = videoFilePath.includes('_UNPACK_');
+                const isIncomplete = status.status === 'downloading' && sabnzbdConfig?.incompleteDir && videoFilePath.includes(sabnzbdConfig.incompleteDir);
 
-                // Estimate final file size - use SABnzbd total if extracting, otherwise actual size
+                // Estimate final file size - use SABnzbd total if downloading, otherwise actual size
                 let estimatedFileSize = currentFileSize;
-                if (isBeingExtracted && status.percentComplete && status.percentComplete > 0) {
+                if (isIncomplete && status.percentComplete && status.percentComplete > 0) {
                     // Estimate based on: currentSize / percentExtracted
                     // Assume extraction progress roughly matches download progress
                     const estimateFromProgress = currentFileSize / (status.percentComplete / 100);
@@ -1399,10 +1863,10 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                 streamInfo.lastAccess = Date.now();
                 streamInfo.streamCount++;
 
-                // Update file size estimate if file is still extracting and we have better info
+                // Update file size estimate if file is still downloading and we have better info
                 const currentFileSize = fs.statSync(videoFilePath).size;
-                const isBeingExtracted = videoFilePath.includes('_UNPACK_');
-                if (isBeingExtracted && status.percentComplete && status.percentComplete > 0) {
+                const isIncomplete = status.status === 'downloading' && sabnzbdConfig?.incompleteDir && videoFilePath.includes(sabnzbdConfig.incompleteDir);
+                if (isIncomplete && status.percentComplete && status.percentComplete > 0) {
                     // Estimate based on current progress
                     const estimateFromProgress = currentFileSize / (status.percentComplete / 100);
 
@@ -1418,8 +1882,8 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                     console.log(`[USENET] File extraction: ${(currentFileSize / 1024 / 1024).toFixed(1)} MB extracted (${extractedPercent.toFixed(1)}%), download at ${status.percentComplete.toFixed(1)}%, estimated final: ${(newEstimate / 1024 / 1024).toFixed(1)} MB`);
 
                     streamInfo.fileSize = newEstimate;
-                } else if (!isBeingExtracted && currentFileSize > streamInfo.fileSize) {
-                    // File finished extracting, use actual size
+                } else if (!isIncomplete && currentFileSize > streamInfo.fileSize) {
+                    // File finished downloading, use actual size
                     streamInfo.fileSize = currentFileSize;
                 }
 
@@ -1525,11 +1989,11 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
 
         // Get file stats for direct streaming
         const stat = fs.statSync(videoFilePath);
-        const isBeingExtracted = videoFilePath.includes('_UNPACK_');
+        const isIncomplete = status.status === 'downloading' && sabnzbdConfig?.incompleteDir && videoFilePath.includes(sabnzbdConfig.incompleteDir);
 
-        // Estimate final file size - use SABnzbd total if extracting, otherwise actual size
+        // Estimate final file size - use SABnzbd total if downloading, otherwise actual size
         let estimatedFileSize = stat.size;
-        if (isBeingExtracted && status.percentComplete && status.percentComplete > 0) {
+        if (isIncomplete && status.percentComplete && status.percentComplete > 0) {
             // Estimate based on: currentSize / percentExtracted
             const estimateFromProgress = stat.size / (status.percentComplete / 100);
 

@@ -1,0 +1,54 @@
+FROM ubuntu:22.04
+
+# Install system dependencies and build tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip \
+    fuse libfuse-dev \
+    build-essential automake autoconf libtool \
+    unrar libunrar-dev \
+    ffmpeg \
+    wget ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+# Build UnRAR library from source
+RUN cd /tmp && \
+    wget https://www.rarlab.com/rar/unrarsrc-6.2.12.tar.gz && \
+    tar xzf unrarsrc-6.2.12.tar.gz && \
+    cd unrar && \
+    make lib && \
+    make install-lib
+
+# Build rar2fs from source
+RUN cd /tmp && \
+    wget https://github.com/hasse69/rar2fs/releases/download/v1.29.6/rar2fs-1.29.6.tar.gz && \
+    tar xzf rar2fs-1.29.6.tar.gz && \
+    cd rar2fs-1.29.6 && \
+    autoreconf -f -i && \
+    ./configure --with-unrar=/tmp/unrar --with-unrar-lib=/usr/local/lib && \
+    make && \
+    make install && \
+    ldconfig && \
+    cd / && \
+    rm -rf /tmp/rar2fs-1.29.6* /tmp/unrar*
+
+# Allow FUSE user_allow_other
+RUN sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf || true
+
+# Create working directory
+WORKDIR /app
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY fastapi_file_server.py .
+
+# Create mount point for rar2fs
+RUN mkdir -p /mnt/rarfs
+
+# Expose port
+EXPOSE 3003
+
+# Run with uvicorn (4 workers for production)
+CMD ["python", "fastapi_file_server.py", "/downloads", "--port", "3003", "--host", "0.0.0.0", "--workers", "4"]
