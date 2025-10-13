@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sootio-config
+data:
+  ADDON_URL: "YOUR_ADDON_URL"
+  JACKETT_URL: "YOUR_JACKETT_URL"
+  JACKETT_API_KEY: "JACKETT_API_KEY"
+  TORRENTIO_URL: "https://torrentio.strem.fun"
+  ZILEAN_URL: "https://zilean.elfhosted.com"
+  ZILEAN_LIMIT: "200"
+  COMET_URL: "https://comet.elfhosted.com"
+  STREMTHRU_URL: "https://stremthru.elfhosted.com"
+  BITMAGNET_URL: "BITMAGNET_URL"
+  TORZNAB_LIMIT: "100"
+  JACKETT_ENABLED: "true"
+  TORRENTIO_ENABLED: "false"
+  ZILEAN_ENABLED: "true"
+  COMET_ENABLED: "false"
+  STREMTHRU_ENABLED: "false"
+  BITMAGNET_ENABLED: "false"
+  BT4G_ENABLED: "true"
+  TORRENT_GALAXY_ENABLED: "true"
+  BT4G_MAX_PAGES: "4"
+  SCRAPER_TIMEOUT: "3000"
+  PORT: "55771"
+  PRIORITY_PENALTY_AAC_OPUS_ENABLED: "true"
+  PRIORITY_SKIP_LOW_RESOLUTION_ENABLED: "true"
+  PRIORITY_SKIP_WEBRIP_ENABLED: "true"
+  PRIORITY_SKIP_AAC_OPUS_ENABLED: "true"
+  RD_HASH_CACHE_ENABLED: "true"
+  RD_HASH_CACHE_LIFETIME_DAYS: "30"
+  RD_BATCH_SIZE: "40"
+  RD_MAX_PASSES: "5"
+  DIVERSIFY_CODECS_ENABLED: "true"
+  TARGET_CODEC_COUNT: "4"
+  MAX_RESULTS_REMUX: "2"
+  MAX_RESULTS_WEBDL: "2"
+  MAX_RESULTS_BLURAY: "3"
+  MAX_RESULTS_WEBRIP: "1"
+  MAX_H265_RESULTS_PER_QUALITY: "1"
+  MAX_H264_RESULTS_PER_QUALITY: "20"
+  RD_DEBUG_LOGS: "true"
+  MAX_PACKS_TO_INSPECT: "15"
+  MAX_PACK_ROUNDS: "3"
+  RD_RATE_PER_MINUTE: "250"
+  RD_CONCURRENCY: "4"
+  HTTP_KEEPALIVE_TIMEOUT: "65000"
+  HTTP_HEADERS_TIMEOUT: "72000"
+  MONGO_CACHE_ENABLED: "false"
+  MONGO_URI: "mongodb://localhost:27017"
+  MONGO_DB_NAME: "sootio"
+  MONGO_CACHE_COLLECTION: "magnet_cache"
+  MONGO_CACHE_TTL_DAYS: "30"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sootio-deployment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sootio
+  template:
+    metadata:
+      labels:
+        app: sootio
+    spec:
+      containers:
+      - name: sootio
+        image: YOUR_IMAGE_NAME_HERE
+        ports:
+        - containerPort: 55771
+        envFrom:
+        - configMapRef:
+            name: sootio-config
+        command: ["node", "server.js"]
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sootio-service
+spec:
+  selector:
+    app: sootio
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 55771
+  type: LoadBalancer
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: sootio-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: sootio-deployment
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 50
+

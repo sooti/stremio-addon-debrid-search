@@ -2265,8 +2265,9 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
 app.use((req, res, next) => serverless(req, res, next));
 
 const port = process.env.PORT || 6907;
-const server = app.listen(port, () => {
-    console.log(`Started addon at: http://127.0.0.1:${port}`);
+const host = '0.0.0.0';
+const server = app.listen(port, host, () => {
+    console.log(`Started addon at: http://${host}:${port}`);
 
     if (mongoCache?.isEnabled()) {
         mongoCache.initMongo().then(() => {
