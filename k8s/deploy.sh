@@ -98,6 +98,35 @@ else
     echo "Skipping image build and push..."
 fi
 
+# read .env if present and export variables (so PORT can be used)
+if [ -f .env ]; then
+  echo "Loading .env and exporting variables for manifest templating..."
+  # Export variables from .env (ignore comments/empty lines)
+  set -o allexport
+  # shellcheck disable=SC1090
+  source <(grep -v '^\s*#' .env | sed -E 's/\r$//')
+  set +o allexport
+else
+  echo "No .env file found in project root; continuing with defaults."
+fi
+
+# Ensure PORT set (or default 6907)
+PORT="${PORT:-6907}"
+# Validate PORT is integer
+if ! printf '%s' "$PORT" | grep -Eq '^[0-9]+$'; then
+  echo "ERROR: PORT value '${PORT}' is not a valid integer. Set PORT in .env to a number." >&2
+  exit 1
+fi
+echo "Using PORT=${PORT}"
+
+# Create (or update) ConfigMap from .env if present
+if [ -f .env ]; then
+  echo "Applying ConfigMap from .env to namespace default (configmap: sootio-config)"
+  kubectl create configmap sootio-config --from-env-file=.env --dry-run=client -o yaml | kubectl apply -f -
+else
+  echo "No .env file to create ConfigMap from; skipping ConfigMap creation."
+fi
+
 # 3. Update the Kubernetes deployment with the image name
 # This step is temporary and will be replaced by a better solution in the future.
 echo "Updating Kubernetes deployment with image: $IMAGE_NAME..."
@@ -118,10 +147,11 @@ echo "
 Deployment successful!"
 
 if [ "$NO_PORT_FORWARD" = false ]; then
-    echo ""
-    echo "Starting port-forward... Press Ctrl+C to stop."
-    echo "You will be able to access the application at http://localhost:55771 (and on other machines at http://<your-ip>:55771)"
-    kubectl port-forward --address 0.0.0.0 service/sootio-service 55771:80
+    echo "Starting port-forward in the background using nohup..."
+    echo "You will be able to access the application at http://localhost:${PORT} (and on other machines at http://<your-ip>:${PORT})"
+    echo "The output of the command will be written to nohup.out"
+    echo "To stop the port-forwarding, find the process ID and kill it. (e.g., pgrep -f 'kubectl port-forward' | xargs kill)"
+    nohup kubectl port-forward --address 0.0.0.0 service/sootio-service ${PORT}:80 &
 fi
 
 
@@ -137,6 +167,6 @@ Next steps:
    kubectl get pods
 
 3. To access the service, run:
-   kubectl port-forward service/sootio-service <local-port>:80
-   (e.g., kubectl port-forward service/sootio-service 55771:80)
+   kubectl port-forward service/sootio-service <local-port>:${PORT}
+   (e.g., kubectl port-forward service/sootio-service 8080:${PORT})
 "
