@@ -40,7 +40,8 @@
 		"stremio-addon-sdk": "^1.6.10",
 		"swagger-stats": "^0.99.7",
 		"urlencode": "^2.0.0",
-		"xml2js": "^0.6.2"
+		"xml2js": "^0.6.2",
+		"axios-cookiejar-support": "^6.0.4"
 	},
 	"keywords": [
 		"stremio",
