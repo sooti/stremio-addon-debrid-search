@@ -2,6 +2,7 @@ import { addonBuilder } from "stremio-addon-sdk"
 import StreamProvider from './lib/stream-provider.js'
 import CatalogProvider from './lib/catalog-provider.js'
 import { getManifest } from './lib/util/manifest.js'
+import { obfuscateSensitive } from './lib/common/torrent-utils.js'
 
 const CACHE_MAX_AGE = parseInt(process.env.CACHE_MAX_AGE) || 1 * 60 // 1 min
 const STALE_REVALIDATE_AGE = 1 * 60 // 1 min
@@ -85,7 +86,11 @@ builder.defineStreamHandler(args => {
             case 'movie':
                 StreamProvider.getMovieStreams(args.config, args.type, args.id)
                     .then(streams => {
-                        console.log("Response streams: " + JSON.stringify(streams))
+                        const keysToObfuscate = [
+                            args.config?.DebridApiKey,
+                            ...(Array.isArray(args.config?.DebridServices) ? args.config.DebridServices.map(s => s.apiKey) : [])
+                        ].filter(Boolean);
+                        console.log("Response streams: " + obfuscateSensitive(JSON.stringify(streams), keysToObfuscate))
                         resolve({
                             streams,
                             ...enrichCacheParams()
@@ -96,7 +101,11 @@ builder.defineStreamHandler(args => {
             case 'series':
                 StreamProvider.getSeriesStreams(args.config, args.type, args.id)
                     .then(streams => {
-                        console.log("Response streams: " + JSON.stringify(streams))
+                        const keysToObfuscate = [
+                            args.config?.DebridApiKey,
+                            ...(Array.isArray(args.config?.DebridServices) ? args.config.DebridServices.map(s => s.apiKey) : [])
+                        ].filter(Boolean);
+                        console.log("Response streams: " + obfuscateSensitive(JSON.stringify(streams), keysToObfuscate))
                         resolve({
                             streams,
                             ...enrichCacheParams()

@@ -18,6 +18,8 @@ import Newznab from './lib/newznab.js';
 import SABnzbd from './lib/sabnzbd.js';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
+import { obfuscateSensitive } from './lib/common/torrent-utils.js';
 
 const RESOLVED_URL_CACHE = new Map();
 const PENDING_RESOLVES = new Map();
@@ -141,19 +143,21 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
     const { debridProvider, debridApiKey, url } = req.params;
     const decodedUrl = decodeURIComponent(url);
     const clientIp = requestIp.getClientIp(req);
-    const cacheKey = `${debridProvider}:${decodedUrl}`;
+    // Use provider + hash of URL as cache key to avoid storing decoded URLs with API keys
+    const cacheKeyHash = crypto.createHash('md5').update(decodedUrl).digest('hex');
+    const cacheKey = `${debridProvider}:${cacheKeyHash}`;
 
     try {
         let finalUrl;
 
         if (RESOLVED_URL_CACHE.has(cacheKey)) {
             finalUrl = RESOLVED_URL_CACHE.get(cacheKey);
-            console.log(`[CACHE] Using cached URL for key: ${cacheKey}`);
+            console.log(`[CACHE] Using cached URL for key: ${debridProvider}:${cacheKeyHash.substring(0, 8)}...`);
         } else if (PENDING_RESOLVES.has(cacheKey)) {
-            console.log(`[RESOLVER] Joining in-flight resolve for key: ${cacheKey}`);
+            console.log(`[RESOLVER] Joining in-flight resolve for key: ${debridProvider}:${cacheKeyHash.substring(0, 8)}...`);
             finalUrl = await PENDING_RESOLVES.get(cacheKey);
         } else {
-            console.log(`[RESOLVER] Cache miss. Resolving URL for ${debridProvider}: ${decodedUrl}`);
+            console.log(`[RESOLVER] Cache miss. Resolving URL for ${debridProvider}`);
             const p = streamProvider.resolveUrl(debridProvider, debridApiKey, null, decodedUrl, clientIp);
             const timed = Promise.race([ p, new Promise((_, rej) => setTimeout(() => rej(new Error('Resolve timeout')), 20000)) ]);
             PENDING_RESOLVES.set(cacheKey, timed.finally(() => PENDING_RESOLVES.delete(cacheKey)));
@@ -166,7 +170,9 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
         }
 
         if (finalUrl) {
-            console.log("[RESOLVER] Redirecting to final stream URL:", finalUrl);
+            // Sanitize finalUrl before logging - it may contain API keys or auth tokens
+            const sanitizedUrl = obfuscateSensitive(finalUrl, debridApiKey);
+            console.log("[RESOLVER] Redirecting to final stream URL:", sanitizedUrl);
             // Issue a 302 redirect to the final URL.
             res.redirect(302, finalUrl);
         } else {
