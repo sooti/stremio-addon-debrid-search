@@ -21,19 +21,68 @@ builder.defineCatalogHandler((args) => {
                 apiKey: s.apiKey ? '*'.repeat(s.apiKey.length) : ''
             }))
         }
-        console.log("Request for catalog with args: " + JSON.stringify(debugArgs))
+        console.log("[CATALOG-HANDLER] ========== CATALOG REQUEST START ==========")
+        console.log("[CATALOG-HANDLER] Request for catalog with args: " + JSON.stringify(debugArgs))
+        console.log("[CATALOG-HANDLER] Catalog ID:", args.id)
+        console.log("[CATALOG-HANDLER] Catalog Type:", args.type)
+        console.log("[CATALOG-HANDLER] Has config?", !!args.config)
+        console.log("[CATALOG-HANDLER] Config has DebridServices?", !!(args.config?.DebridServices))
+        console.log("[CATALOG-HANDLER] DebridServices:", args.config?.DebridServices?.map(s => s.provider))
 
-        // Request to Debrid Search
-        if (args.id == 'debridsearch') {
-            const hasValidConfig = (
-                (args.config?.DebridServices && Array.isArray(args.config.DebridServices) && args.config.DebridServices.length > 0) ||
-                (args.config?.DebridProvider && args.config?.DebridApiKey) ||
-                args.config?.DebridLinkApiKey
-            )
-            if (!hasValidConfig) {
-                reject(new Error('Invalid Debrid configuration: Missing configs'))
+        const hasValidConfig = (
+            (args.config?.DebridServices && Array.isArray(args.config.DebridServices) && args.config.DebridServices.length > 0) ||
+            (args.config?.DebridProvider && args.config?.DebridApiKey) ||
+            args.config?.DebridLinkApiKey
+        )
+
+        if (!hasValidConfig) {
+            reject(new Error('Invalid Debrid configuration: Missing configs'))
+            return
+        }
+
+        // Check if this is a downloads catalog request
+        const isDownloadsCatalog = args.id.endsWith('-downloads') || args.id === 'all-downloads';
+
+        console.log('[CATALOG] Request received:', {
+            catalogId: args.id,
+            isDownloadsCatalog,
+            type: args.type,
+            hasExtra: !!args.extra
+        });
+
+        if (isDownloadsCatalog) {
+            // Handle personal downloads catalog
+            let serviceProvider = null;
+
+            // Extract service name from catalog ID (e.g., "realdebrid-downloads" -> "realdebrid")
+            if (args.id !== 'all-downloads') {
+                serviceProvider = args.id.replace('-downloads', '');
             }
 
+            console.log(`[CATALOG] Fetching personal downloads for service: ${serviceProvider || 'all'}`);
+
+            CatalogProvider.listPersonalDownloads(args.config, serviceProvider)
+                .then(metas => {
+                    console.log(`[CATALOG-HANDLER] ========== CATALOG RESPONSE ==========`)
+                    console.log(`[CATALOG-HANDLER] Response metas for ${args.id}: ${metas.length} items`)
+                    if (metas.length > 0) {
+                        console.log(`[CATALOG-HANDLER] Sample meta:`, JSON.stringify(metas[0]).substring(0, 200))
+                    }
+                    console.log(`[CATALOG-HANDLER] ========== CATALOG REQUEST END ==========`)
+                    resolve({
+                        metas,
+                        ...enrichCacheParams()
+                    })
+                })
+                .catch(err => {
+                    console.error(`[CATALOG-HANDLER] ========== CATALOG ERROR ==========`)
+                    console.error(`[CATALOG-HANDLER] Error fetching personal downloads: ${err.message}`)
+                    console.error(`[CATALOG-HANDLER] Stack trace:`, err.stack)
+                    console.error(`[CATALOG-HANDLER] ========== CATALOG REQUEST END ==========`)
+                    reject(err)
+                })
+        } else if (args.id == 'debridsearch') {
+            // Request to Debrid Search
             // Search catalog request
             if (args.extra.search) {
                 CatalogProvider.searchTorrents(args.config, args.extra.search)
