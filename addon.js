@@ -61,7 +61,7 @@ builder.defineCatalogHandler((args) => {
 
             console.log(`[CATALOG] Fetching personal downloads for service: ${serviceProvider || 'all'}`);
 
-            CatalogProvider.listPersonalDownloads(args.config, serviceProvider)
+            CatalogProvider.listPersonalDownloads(args.config, serviceProvider, args.type)
                 .then(metas => {
                     console.log(`[CATALOG-HANDLER] ========== CATALOG RESPONSE ==========`)
                     console.log(`[CATALOG-HANDLER] Response metas for ${args.id}: ${metas.length} items`)
@@ -96,7 +96,7 @@ builder.defineCatalogHandler((args) => {
                     .catch(err => reject(err))
             } else {
                 // Standard catalog request
-                CatalogProvider.listTorrents(args.config, args.extra.skip)
+                CatalogProvider.listTorrents(args.config, args.extra.skip, args.type)
                     .then(metas => {
                         console.log("Response metas: " + JSON.stringify(metas))
                         resolve({
