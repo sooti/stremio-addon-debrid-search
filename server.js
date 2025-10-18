@@ -20,9 +20,33 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { obfuscateSensitive } from './lib/common/torrent-utils.js';
+import { getManifest } from './lib/util/manifest.js';
+import landingTemplate from './lib/util/landingTemplate.js';
 
 const RESOLVED_URL_CACHE = new Map();
 const PENDING_RESOLVES = new Map();
+
+const app = express();
+
+app.get('/', (req, res) => {
+    res.redirect('/configure');
+});
+app.get('/configure', (req, res) => {
+    const manifest = getManifest({}, true);
+    res.send(landingTemplate(manifest));
+});
+
+app.get('/manifest-no-catalogs.json', (req, res) => {
+    const manifest = getManifest({}, true);
+    res.json(manifest);
+});
+
+app.use((req, res, next) => {
+    if (['/', '/configure', '/manifest-no-catalogs.json'].includes(req.path)) {
+        return next();
+    }
+    serverless(req, res);
+});
 
 // Track active Usenet streams: nzoId -> { lastAccess, streamCount, config, videoFilePath, usenetConfig }
 const ACTIVE_USENET_STREAMS = new Map();
@@ -103,8 +127,7 @@ const STREAM_CLEANUP_INTERVAL = 2 * 60 * 1000;
 // If user was just paused/buffering, they can restart the stream
 const STREAM_INACTIVE_TIMEOUT = 10 * 60 * 1000; // 10 minutes of inactivity
 
-const app = express();
-app.enable('trust proxy');
+
 app.use(cors());
 
 // Swagger stats middleware (unchanged)
@@ -2272,16 +2295,21 @@ app.use((req, res, next) => serverless(req, res, next));
 
 const port = process.env.PORT || 6907;
 const host = '0.0.0.0';
-const server = app.listen(port, host, () => {
-    console.log(`Started addon at: http://${host}:${port}`);
+const server = app.listen(process.env.PORT || 7000, () => {
+    console.log('HTTP server listening on port: ' + server.address().port);
+});
 
-    if (mongoCache?.isEnabled()) {
-        mongoCache.initMongo().then(() => {
-            console.log('[CACHE] MongoDB cache initialized');
-        }).catch(err => {
-            console.error('[CACHE] MongoDB init failed:', err?.message || err);
-        });
-    } else {
-        console.log('[CACHE] MongoDB cache disabled');
+if (mongoCache?.isEnabled()) {
+    mongoCache.initMongo().then(() => {
+        console.log('[CACHE] MongoDB cache initialized');
+    }).catch(err => {
+        console.error('[CACHE] MongoDB init failed:', err?.message || err);
+    });
+}
+
+app.use((req, res, next) => {
+    if (['/', '/configure', '/manifest-no-catalogs.json'].includes(req.path)) {
+        return next();
     }
+    serverless(req, res);
 });

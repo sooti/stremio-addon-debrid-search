@@ -11,6 +11,11 @@ const STALE_ERROR_AGE = 1 * 24 * 60 * 60 // 1 days
 const builder = new addonBuilder(getManifest())
 
 builder.defineCatalogHandler((args) => {
+    // Check if the catalog should be disabled
+    if (args.id === 'SKIP_CATALOG') {
+        console.log('[CATALOG-HANDLER] Catalog display is skipped.');
+        return Promise.resolve({ metas: [] });
+    }
     return new Promise((resolve, reject) => {
         const debugArgs = structuredClone(args)
         if (args.config?.DebridApiKey)
