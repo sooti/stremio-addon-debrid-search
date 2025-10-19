@@ -2295,9 +2295,26 @@ app.use((req, res, next) => serverless(req, res, next));
 
 const port = process.env.PORT || 6907;
 const host = '0.0.0.0';
-const server = app.listen(process.env.PORT || 7000, () => {
-    console.log('HTTP server listening on port: ' + server.address().port);
-});
+
+// Only start server if not being imported by cluster setup
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+let server;
+if (import.meta.url === `file://${__filename}`) {
+    server = app.listen(process.env.PORT || 7000, host, () => {
+        console.log('HTTP server listening on port: ' + server.address().port);
+    });
+} else {
+    // Export app and server for cluster usage
+    server = null;
+}
+
+// Export for cluster usage
+export { app, server };
 
 if (mongoCache?.isEnabled()) {
     mongoCache.initMongo().then(() => {

@@ -124,6 +124,17 @@ You can enable an optional MongoDB-backed cache that stores information about ca
 
 If disabled or not configured, the addon behaves as before (including optional Real-Debrid file cache).
 
+### Clustering and Multiple Workers
+
+Sootio supports running multiple worker processes to better utilize multiple CPU cores. This can improve performance under high load.
+
+- To run with multiple workers: `npm run cluster`
+- By default, it runs single-threaded as before with `npm start`
+- Control number of workers with environment variable: `MAX_WORKERS=12 npm run cluster`
+- Workers will automatically restart if they crash
+- Recommended: Set `MAX_WORKERS` to number of CPU cores on your server (or less)
+- Maximum 32 workers to prevent system overloading
+
 ---
 
 ## ⚠️ Notes & Current Issues
