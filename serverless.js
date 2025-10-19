@@ -25,8 +25,8 @@ router.get('/:configuration?/configure', (req, res) => {
 
 router.get('/:configuration?/manifest.json', (req, res) => {
     const config = parseConfiguration(req.params.configuration)
-    // For initial install (no configuration), serve manifest without catalogs to avoid requesting catalog data
-    const noCatalogs = Object.keys(config).length === 0;
+    // For initial install (no configuration) or when ShowCatalog is explicitly disabled, serve manifest without catalogs
+    const noCatalogs = Object.keys(config).length === 0 || config.ShowCatalog === false;
     res.setHeader('content-type', 'application/json; charset=utf-8')
     res.end(JSON.stringify(getManifest(config, noCatalogs)))
 })
