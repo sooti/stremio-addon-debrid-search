@@ -2298,8 +2298,8 @@ app.use((req, res, next) => {
     serverless(req, res, next);
 });
 
-const port = process.env.PORT || 6907;
-const host = '0.0.0.0';
+const HOST = process.env.HOST || '0.0.0.0';
+const PORT = process.env.PORT || 7000;  // Consistent port definition
 
 // Only start server if not being imported by cluster setup
 import { fileURLToPath } from 'url';
@@ -2308,18 +2308,18 @@ import { dirname } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-let server;
+let server = null;
+
+// Check if we're running directly (not being imported by cluster)
+// For standalone mode, start the server directly
 if (import.meta.url === `file://${__filename}`) {
-    server = app.listen(process.env.PORT || 7000, host, () => {
+    server = app.listen(PORT, HOST, () => {
         console.log('HTTP server listening on port: ' + server.address().port);
     });
-} else {
-    // Export app and server for cluster usage
-    server = null;
 }
 
 // Export for cluster usage
-export { app, server };
+export { app, server, PORT, HOST };
 
 if (mongoCache?.isEnabled()) {
     mongoCache.initMongo().then(() => {
@@ -2328,10 +2328,3 @@ if (mongoCache?.isEnabled()) {
         console.error('[CACHE] MongoDB init failed:', err?.message || err);
     });
 }
-
-app.use((req, res, next) => {
-    if (['/', '/configure', '/manifest-no-catalogs.json'].includes(req.path) || req.path.startsWith('/resolve/')) {
-        return next();
-    }
-    serverless(req, res);
-});

@@ -48,10 +48,24 @@ if (cluster.isMaster) {
     // Worker processes
     console.log(`Worker ${process.pid} started`);
     
-    // Import and start the server
+    // Import server.js and start the server explicitly in worker process
     try {
-        await import('./server.js');
-        console.log(`Worker ${process.pid} server listening on port ${process.env.PORT || 7000}`);
+        const { app, server, PORT, HOST } = await import('./server.js');
+        
+        // Start server in worker if it's not already started
+        if (!server || server === null) {
+            const port = PORT;
+            const host = HOST;
+            
+            const workerServer = app.listen(port, host, () => {
+                console.log(`Worker ${process.pid} server listening on port ${port}`);
+            });
+            
+            // Export server for the worker process to use for cleanup
+            global.workerServer = workerServer;
+        } else {
+            console.log(`Worker ${process.pid} using existing server on port ${PORT}`);
+        }
     } catch (error) {
         console.error(`Worker ${process.pid} failed to start:`, error);
         process.exit(1);
@@ -60,11 +74,25 @@ if (cluster.isMaster) {
     // Handle graceful shutdown for workers
     process.on('SIGINT', () => {
         console.log(`Worker ${process.pid} received SIGINT, shutting down...`);
-        process.exit(0);
+        if (global.workerServer) {
+            global.workerServer.close(() => {
+                console.log(`Worker ${process.pid} server closed`);
+                process.exit(0);
+            });
+        } else {
+            process.exit(0);
+        }
     });
 
     process.on('SIGTERM', () => {
         console.log(`Worker ${process.pid} received SIGTERM, shutting down...`);
-        process.exit(0);
+        if (global.workerServer) {
+            global.workerServer.close(() => {
+                console.log(`Worker ${process.pid} server closed`);
+                process.exit(0);
+            });
+        } else {
+            process.exit(0);
+        }
     });
 }
