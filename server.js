@@ -766,7 +766,7 @@ async function findVideoFileViaAPI(fileServerUrl, releaseName, options = {}, fil
             return null;
         }
 
-        console.log(`[USENET] Selected largest file: ${largestFile.name} (${(largestFile.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
+        console.log(`[USENET] Selected largest file: ${largestFile.name} (${(largestFile.size / 1024 / 1024 / 1024).toFixed(2)} GB`);
 
         // Use full path with folder so rar2fs can find the extracted file
         return {
@@ -2213,7 +2213,7 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                     while (Date.now() - startWait < maxWait) {
                         await new Promise(resolve => setTimeout(resolve, pollInterval));
 
-                        // Check file size again
+                        // Re-check file size again
                         const newStat = fs.statSync(videoFilePath);
                         console.log(`[USENET] Waiting for file to grow... Current size: ${(newStat.size / 1024 / 1024).toFixed(2)} MB`);
 
@@ -2292,7 +2292,7 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
 });
 
 app.use((req, res, next) => {
-    if (req.path.startsWith('/resolve/')) {
+    if (['/', '/configure', '/manifest-no-catalogs.json'].includes(req.path) || req.path.startsWith('/resolve/')) {
         return next();
     }
     serverless(req, res, next);

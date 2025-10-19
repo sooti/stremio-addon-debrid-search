@@ -1,45 +1,70 @@
 import Router from 'router'
+import cors from 'cors'
+import rateLimit from "express-rate-limit";
+import requestIp from 'request-ip'
 import addonInterface from "./addon.js"
 import landingTemplate from "./lib/util/landingTemplate.js"
 import StreamProvider from './lib/stream-provider.js'
 import { decode } from 'urlencode'
 import qs from 'querystring'
-import requestIp from 'request-ip'
 import { getManifest } from './lib/util/manifest.js'
 import { parseConfiguration } from './lib/util/configuration.js'
 import { BadTokenError, BadRequestError, AccessDeniedError } from './lib/util/error-codes.js'
 import RealDebrid from './lib/real-debrid.js'
 
 const router = new Router();
+const limiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 300, // limit each IP to 300 requests per windowMs
+  headers: false,
+  keyGenerator: (req) => requestIp.getClientIp(req)
+})
+
+router.use(cors())
 
 router.get('/', (_, res) => {
     res.redirect('/configure')
+    res.end();
 })
 
 router.get('/:configuration?/configure', (req, res) => {
     const config = parseConfiguration(req.params.configuration)
-    const landingHTML = landingTemplate(addonInterface.manifest, config)
+    const host = `${req.protocol}://${req.headers.host}`;
+    const configValues = { ...config, host };
+    const landingHTML = landingTemplate(addonInterface.manifest, configValues)
     res.setHeader('content-type', 'text/html')
     res.end(landingHTML)
 })
 
 router.get('/:configuration?/manifest.json', (req, res) => {
     const config = parseConfiguration(req.params.configuration)
+    const host = `${req.protocol}://${req.headers.host}`;
+    const configValues = { ...config, host };
     // For initial install (no configuration) or when ShowCatalog is explicitly disabled, serve manifest without catalogs
     const noCatalogs = Object.keys(config).length === 0 || config.ShowCatalog === false;
-    res.setHeader('content-type', 'application/json; charset=utf-8')
-    res.end(JSON.stringify(getManifest(config, noCatalogs)))
+    
+    // Set proper headers for Stremio compatibility (keeps the CORS fix)
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    
+    res.end(JSON.stringify(getManifest(configValues, noCatalogs)))
 })
 
-router.get(`/:configuration?/:resource/:type/:id/:extra?.json`, (req, res, next) => {
+router.get(`/:configuration?/:resource/:type/:id/:extra?.json`, limiter, (req, res, next) => {
     const { resource, type, id } = req.params
     const config = parseConfiguration(req.params.configuration)
     const extra = req.params.extra ? qs.parse(req.url.split('/').pop().slice(0, -5)) : {}
-
-    addonInterface.get(resource, type, id, extra, config)
+    const host = `${req.protocol}://${req.headers.host}`;
+    
+    // Combine all configuration values properly
+    const fullConfig = { ...config, host };
+    
+    addonInterface.get(resource, type, id, extra, fullConfig)
         .then(async (resp) => {
-            if (config.DebridProvider === 'RealDebrid' && resp && resp.streams) {
-                resp.streams = await RealDebrid.validatePersonalStreams(config.DebridApiKey, resp.streams);
+            if (fullConfig.DebridProvider === 'RealDebrid' && resp && resp.streams) {
+                resp.streams = await RealDebrid.validatePersonalStreams(fullConfig.DebridApiKey, resp.streams);
             }
 
             let cacheHeaders = {
@@ -52,7 +77,7 @@ router.get(`/:configuration?/:resource/:type/:id/:extra?.json`, (req, res, next)
                 .map(prop => Number.isInteger(resp[prop]) && cacheHeaders[prop] + '=' + resp[prop])
                 .filter(val => !!val).join(', ')
 
-            res.setHeader('Cache-Control', `${cacheControl}, private`)
+            res.setHeader('Cache-Control', `${cacheControl}, public`)
             res.setHeader('Content-Type', 'application/json; charset=utf-8')
             res.end(JSON.stringify(resp))
         })
@@ -62,7 +87,7 @@ router.get(`/:configuration?/:resource/:type/:id/:extra?.json`, (req, res, next)
         })
 })
 
-router.get('/resolve/:debridProvider/:debridApiKey/:id/:hostUrl', (req, res) => {
+router.get('/resolve/:debridProvider/:debridApiKey/:id/:hostUrl', limiter, (req, res) => {
     const clientIp = requestIp.getClientIp(req)
     StreamProvider.resolveUrl(req.params.debridProvider, req.params.debridApiKey, req.params.id, decode(req.params.hostUrl), clientIp)
         .then(url => {
@@ -75,7 +100,7 @@ router.get('/resolve/:debridProvider/:debridApiKey/:id/:hostUrl', (req, res) => 
 })
 
 // Handle 3-parameter resolve URLs (compatibility with server.js format)
-router.get('/resolve/:debridProvider/:debridApiKey/:url', (req, res) => {
+router.get('/resolve/:debridProvider/:debridApiKey/:url', limiter, (req, res) => {
     const { debridProvider, debridApiKey, url } = req.params;
     const decodedUrl = decodeURIComponent(url);
     const clientIp = requestIp.getClientIp(req);
