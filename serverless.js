@@ -72,6 +72,26 @@ router.get('/resolve/:debridProvider/:debridApiKey/:id/:hostUrl', (req, res) => 
         })
 })
 
+// Handle 3-parameter resolve URLs (compatibility with server.js format)
+router.get('/resolve/:debridProvider/:debridApiKey/:url', (req, res) => {
+    const { debridProvider, debridApiKey, url } = req.params;
+    const decodedUrl = decodeURIComponent(url);
+    const clientIp = requestIp.getClientIp(req);
+    
+    StreamProvider.resolveUrl(debridProvider, debridApiKey, null, decodedUrl, clientIp)
+        .then(url => {
+            if (url) {
+                res.redirect(url)
+            } else {
+                res.status(404).send('Could not resolve link');
+            }
+        })
+        .catch(err => {
+            console.log(err)
+            handleError(err, res)
+        })
+})
+
 router.get('/ping', (_, res) => {
     res.statusCode = 200
     res.end()

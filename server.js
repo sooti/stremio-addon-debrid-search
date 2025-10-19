@@ -33,7 +33,7 @@ app.get('/', (req, res) => {
 });
 app.get('/configure', (req, res) => {
     const manifest = getManifest({}, true);
-    res.send(landingTemplate(manifest));
+    res.send(landingTemplate(manifest, {}));  // Pass an empty config object to avoid undefined error
 });
 
 app.get('/manifest-no-catalogs.json', (req, res) => {
@@ -42,7 +42,7 @@ app.get('/manifest-no-catalogs.json', (req, res) => {
 });
 
 app.use((req, res, next) => {
-    if (['/', '/configure', '/manifest-no-catalogs.json'].includes(req.path)) {
+    if (['/', '/configure', '/manifest-no-catalogs.json'].includes(req.path) || req.path.startsWith('/resolve/')) {
         return next();
     }
     serverless(req, res);
@@ -2291,7 +2291,12 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
     }
 });
 
-app.use((req, res, next) => serverless(req, res, next));
+app.use((req, res, next) => {
+    if (req.path.startsWith('/resolve/')) {
+        return next();
+    }
+    serverless(req, res, next);
+});
 
 const port = process.env.PORT || 6907;
 const host = '0.0.0.0';
@@ -2325,7 +2330,7 @@ if (mongoCache?.isEnabled()) {
 }
 
 app.use((req, res, next) => {
-    if (['/', '/configure', '/manifest-no-catalogs.json'].includes(req.path)) {
+    if (['/', '/configure', '/manifest-no-catalogs.json'].includes(req.path) || req.path.startsWith('/resolve/')) {
         return next();
     }
     serverless(req, res);
