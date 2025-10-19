@@ -25,8 +25,10 @@ router.get('/:configuration?/configure', (req, res) => {
 
 router.get('/:configuration?/manifest.json', (req, res) => {
     const config = parseConfiguration(req.params.configuration)
+    // For initial install (no configuration), serve manifest without catalogs to avoid requesting catalog data
+    const noCatalogs = Object.keys(config).length === 0;
     res.setHeader('content-type', 'application/json; charset=utf-8')
-    res.end(JSON.stringify(getManifest(config)))
+    res.end(JSON.stringify(getManifest(config, noCatalogs)))
 })
 
 router.get(`/:configuration?/:resource/:type/:id/:extra?.json`, (req, res, next) => {
