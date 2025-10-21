@@ -9,11 +9,15 @@ const numCPUs = os.cpus().length;
 const maxWorkers = parseInt(process.env.MAX_WORKERS) || numCPUs;
 const workersToUse = Math.min(maxWorkers, numCPUs, 32); // Cap at 32 workers as a reasonable upper limit
 
+// Optimize worker configuration for better performance
+process.env.UV_THREADPOOL_SIZE = Math.max(4, Math.floor(numCPUs * 2)); // Increase thread pool for I/O
+
 if (cluster.isMaster) {
     console.log(`Master process ${process.pid} is running`);
     console.log(`Number of CPUs: ${numCPUs}`);
     console.log(`Requested workers: ${maxWorkers}`);
     console.log(`Using ${workersToUse} worker processes (max: ${maxWorkers}, CPUs: ${numCPUs})`);
+    console.log(`UV_THREADPOOL_SIZE set to: ${process.env.UV_THREADPOOL_SIZE}`);
 
     // Fork workers
     for (let i = 0; i < workersToUse; i++) {
