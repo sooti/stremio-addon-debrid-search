@@ -8,7 +8,7 @@
 		"start:dev": "LOG_LEVEL=debug node cluster.js",
 		"standalone": "LOG_LEVEL=error node server.js",
 		"standalone:dev": "LOG_LEVEL=debug node server.js",
-		"dev": "LOG_LEVEL=debug nodemon server.js",
+		"dev": "LOG_LEVEL=debug nodemon server.js"
 	},
 	"author": "Sooti",
 	"license": "MIT",
