@@ -6,9 +6,10 @@ WORKDIR /app
 
 # Copy only package.json and package-lock.json first (better build caching)
 COPY package*.json ./
+COPY pnpm-lock.yaml ./
 
-# Install dependencies
-RUN npm install
+# Install pnpm and then dependencies
+RUN npm install -g pnpm@9 && pnpm install --frozen-lockfile
 
 # Copy rest of the project files
 COPY . .

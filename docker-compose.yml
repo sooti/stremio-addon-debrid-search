@@ -13,10 +13,5 @@ services:
       - .env
     environment:
       - NODE_ENV=production
-    volumes:
-      - node_modules:/app/node_modules
-    command: ["node", "server.js"]
+    command: ["npm", "run", "start"]
     restart: unless-stopped
-
-volumes:
-  node_modules:
