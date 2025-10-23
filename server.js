@@ -201,6 +201,18 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
     const { debridProvider, debridApiKey, url } = req.params;
     const decodedUrl = decodeURIComponent(url);
     const clientIp = requestIp.getClientIp(req);
+
+    // Extract config from query if provided (for NZB resolution)
+    const configParam = req.query.config;
+    let config = {};
+    if (configParam) {
+        try {
+            config = JSON.parse(decodeURIComponent(configParam));
+        } catch (e) {
+            console.log('[RESOLVER] Failed to parse config from query');
+        }
+    }
+
     // Use provider + hash of URL as cache key to avoid storing decoded URLs with API keys
     const cacheKeyHash = crypto.createHash('md5').update(decodedUrl).digest('hex');
     const cacheKey = `${debridProvider}:${cacheKeyHash}`;
@@ -216,28 +228,29 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
             finalUrl = await PENDING_RESOLVES.get(cacheKey);
         } else {
             console.log(`[RESOLVER] Cache miss. Resolving URL for ${debridProvider}`);
-            const resolvePromise = streamProvider.resolveUrl(debridProvider, debridApiKey, null, decodedUrl, clientIp);
-            
-            // Set a configurable timeout for performance tuning
-            const timeoutMs = parseInt(process.env.RESOLVE_TIMEOUT || '20000', 10);
+            const resolvePromise = streamProvider.resolveUrl(debridProvider, debridApiKey, null, decodedUrl, clientIp, config);
+
+            // Set a configurable timeout for performance tuning - increase for NZB downloads
+            const isNzb = decodedUrl.startsWith('nzb:');
+            const timeoutMs = isNzb ? 600000 : parseInt(process.env.RESOLVE_TIMEOUT || '20000', 10); // 10 min for NZB, 20s otherwise
             const timedResolve = Promise.race([
-                resolvePromise, 
-                new Promise((_, reject) => 
+                resolvePromise,
+                new Promise((_, reject) =>
                     setTimeout(() => reject(new Error('Resolve timeout')), timeoutMs)
                 )
             ]);
-            
+
             // Track the pending request
             const pendingRequest = timedResolve.finally(() => {
                 PENDING_RESOLVES.delete(cacheKey);
             });
             PENDING_RESOLVES.set(cacheKey, pendingRequest);
-            
+
             finalUrl = await pendingRequest;
 
             if (finalUrl) {
                 RESOLVED_URL_CACHE.set(cacheKey, finalUrl);
-                
+
                 // Make cache TTL configurable for better performance tuning
                 const cacheTtlMs = parseInt(process.env.RESOLVE_CACHE_TTL_MS || '7200000', 10); // 2 hours default
                 setTimeout(() => {
