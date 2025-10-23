@@ -3,6 +3,7 @@
 import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
+import { overrideConsole } from './lib/util/logger.js';
 import serverless from './serverless.js';
 import requestIp from 'request-ip';
 import rateLimit from 'express-rate-limit';
@@ -14,6 +15,9 @@ import http from 'http';
 import https from 'https';
 import * as scraperCache from './lib/util/scraper-cache.js';
 import Usenet from './lib/usenet.js';
+
+// Override console to respect LOG_LEVEL environment variable
+overrideConsole();
 // Import compression if available, otherwise provide a no-op middleware
 let compression = null;
 try {

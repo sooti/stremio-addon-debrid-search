@@ -2,6 +2,10 @@
 
 import cluster from 'cluster';
 import os from 'os';
+import { overrideConsole } from './lib/util/logger.js';
+
+// Override console to respect LOG_LEVEL environment variable
+overrideConsole();
 
 const numCPUs = os.cpus().length;
 
