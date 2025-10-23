@@ -9,12 +9,6 @@
 		"standalone": "LOG_LEVEL=error node server.js",
 		"standalone:dev": "LOG_LEVEL=debug node server.js",
 		"dev": "LOG_LEVEL=debug nodemon server.js",
-		"test": "echo \"Error: no test specified\" && exit 1",
-		"test:matcher": "node scripts/test-episode-matcher.mjs",
-		"test:btdigg": "node scripts/test-btdigg.mjs",
-		"test:btdigg:mock": "node scripts/test-btdigg-mock.mjs",
-		"test:btdigg:all": "node scripts/test-btdigg.mjs basic && node scripts/test-btdigg.mjs pagination && node scripts/test-btdigg.mjs special_characters",
-		"test:scrapers": "node scripts/test-scrapers.mjs"
 	},
 	"author": "Sooti",
 	"license": "MIT",
