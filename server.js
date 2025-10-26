@@ -15,6 +15,8 @@ import http from 'http';
 import https from 'https';
 import * as scraperCache from './lib/util/scraper-cache.js';
 import Usenet from './lib/usenet.js';
+import { resolveHttpStreamUrl } from './lib/http-streams.js';
+import { resolveUHDMoviesUrl } from './lib/uhdmovies.js';
 
 // Override console to respect LOG_LEVEL environment variable
 overrideConsole();
@@ -271,6 +273,83 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
     } catch (error) {
         console.error("[RESOLVER] A critical error occurred:", error.message);
         res.status(500).send("Error resolving stream.");
+    }
+});
+
+// HTTP Streaming resolver endpoint (for 4KHDHub, UHDMovies, etc.)
+// This endpoint provides lazy resolution - decrypts URLs only when user selects a stream
+app.get('/resolve/httpstreaming/:url', async (req, res) => {
+    const { url } = req.params;
+    const decodedUrl = decodeURIComponent(url);
+
+    // Use hash of URL as cache key
+    const cacheKeyHash = crypto.createHash('md5').update(decodedUrl).digest('hex');
+    const cacheKey = `httpstreaming:${cacheKeyHash}`;
+
+    try {
+        let finalUrl;
+
+        if (RESOLVED_URL_CACHE.has(cacheKey)) {
+            finalUrl = RESOLVED_URL_CACHE.get(cacheKey);
+            console.log(`[HTTP-RESOLVER] Using cached URL for key: ${cacheKeyHash.substring(0, 8)}...`);
+        } else if (PENDING_RESOLVES.has(cacheKey)) {
+            console.log(`[HTTP-RESOLVER] Joining in-flight resolve for key: ${cacheKeyHash.substring(0, 8)}...`);
+            finalUrl = await PENDING_RESOLVES.get(cacheKey);
+        } else {
+            console.log(`[HTTP-RESOLVER] Cache miss. Resolving HTTP stream URL...`);
+
+            // Determine which resolver to use based on URL pattern
+            let resolvePromise;
+            if (decodedUrl.includes('driveleech') || decodedUrl.includes('driveseed') ||
+                decodedUrl.includes('tech.unblockedgames.world') ||
+                decodedUrl.includes('tech.creativeexpressionsblog.com') ||
+                decodedUrl.includes('tech.examzculture.in')) {
+                // UHDMovies SID/driveleech URL
+                console.log(`[HTTP-RESOLVER] Detected UHDMovies URL, using UHDMovies resolver`);
+                resolvePromise = resolveUHDMoviesUrl(decodedUrl);
+            } else {
+                // 4KHDHub/other HTTP streaming URLs
+                console.log(`[HTTP-RESOLVER] Detected 4KHDHub URL, using HTTP stream resolver`);
+                resolvePromise = resolveHttpStreamUrl(decodedUrl);
+            }
+
+            // Set timeout for HTTP stream resolution
+            const timeoutMs = parseInt(process.env.HTTP_RESOLVE_TIMEOUT || '15000', 10); // 15s default
+            const timedResolve = Promise.race([
+                resolvePromise,
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('HTTP resolve timeout')), timeoutMs)
+                )
+            ]);
+
+            // Track the pending request
+            const pendingRequest = timedResolve.finally(() => {
+                PENDING_RESOLVES.delete(cacheKey);
+            });
+            PENDING_RESOLVES.set(cacheKey, pendingRequest);
+
+            finalUrl = await pendingRequest;
+
+            if (finalUrl) {
+                RESOLVED_URL_CACHE.set(cacheKey, finalUrl);
+
+                // Cache TTL for HTTP streams
+                const cacheTtlMs = parseInt(process.env.HTTP_RESOLVE_CACHE_TTL_MS || '3600000', 10); // 1 hour default
+                setTimeout(() => {
+                    RESOLVED_URL_CACHE.delete(cacheKey);
+                }, cacheTtlMs);
+            }
+        }
+
+        if (finalUrl) {
+            console.log("[HTTP-RESOLVER] Redirecting to final stream URL:", finalUrl.substring(0, 100) + '...');
+            res.redirect(302, finalUrl);
+        } else {
+            res.status(404).send('Could not resolve HTTP stream link');
+        }
+    } catch (error) {
+        console.error("[HTTP-RESOLVER] Error occurred:", error.message);
+        res.status(500).send("Error resolving HTTP stream.");
     }
 });
 
