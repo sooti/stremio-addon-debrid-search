@@ -26,6 +26,7 @@
 		"express-rate-limit": "^7.4.1",
 		"fuse.js": "^7.1.0",
 		"ioredis": "^5.8.1",
+		"form-data": "^4.0.4",
 		"loglevel": "^1.9.2",
 		"mongodb": "^6.20.0",
 		"node-cache": "^5.1.2",
