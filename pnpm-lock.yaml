@@ -22,7 +22,7 @@ importers:
         version: 1.12.2(debug@4.3.7)
       axios-cookiejar-support:
         specifier: ^6.0.4
-        version: 6.0.4(axios@1.12.2)(tough-cookie@2.5.0)(undici@7.16.0)
+        version: 6.0.4(axios@1.12.2)(tough-cookie@5.1.2)(undici@7.16.0)
       cheerio:
         specifier: ^1.1.2
         version: 1.1.2
@@ -41,6 +41,9 @@ importers:
       express-rate-limit:
         specifier: ^7.4.1
         version: 7.4.1(express@4.21.1)
+      form-data:
+        specifier: ^4.0.4
+        version: 4.0.4
       fuse.js:
         specifier: ^7.1.0
         version: 7.1.0
@@ -89,6 +92,9 @@ importers:
       swagger-stats:
         specifier: ^0.99.7
         version: 0.99.7(prom-client@14.2.0)
+      tough-cookie:
+        specifier: ^5.0.0
+        version: 5.1.2
       urlencode:
         specifier: ^2.0.0
         version: 2.0.0
@@ -501,10 +507,6 @@ packages:
   form-data@2.3.3:
     resolution: {integrity: sha512-1lLKB2Mu3aGP1Q/2eCOx0fNbRMe7XdwktwOruhfqqd0rIJWwN4Dh+E3hrPSlDCXnSR7UtZ1N38rVXm+6+MEhJQ==}
     engines: {node: '>= 0.12'}
-
-  form-data@4.0.1:
-    resolution: {integrity: sha512-tzN8e4TX8+kkxGPK8D5u0FNmjPUjw3lwC9lSLxxoB/+GtsJG91CO8bSWy73APlgAZzZbXEYZJuxjkHH2w+Ezhw==}
-    engines: {node: '>= 6'}
 
   form-data@4.0.4:
     resolution: {integrity: sha512-KrGhL9Q4zjj0kiUt5OO4Mr/A/jlI2jDYs5eHBpYHPcBEVSiipAvn2Ko2HnPe20rmcuuvMHNdZFp+4IlGTMF0Ow==}
@@ -1082,6 +1084,13 @@ packages:
   through@2.3.8:
     resolution: {integrity: sha512-w89qg7PI8wAdvX60bMDP+bFoD5Dvhm9oLheFp5O4a2QF0cSBGsBX4qZmadPMvVqlLJBBci+WqGGOAPvcDeNSVg==}
 
+  tldts-core@6.1.86:
+    resolution: {integrity: sha512-Je6p7pkk+KMzMv2XXKmAE3McmolOQFdxkKw0R8EYNr7sELW46JqnNeTX8ybPiQgvg1ymCoF8LXs5fzFaZvJPTA==}
+
+  tldts@6.1.86:
+    resolution: {integrity: sha512-WMi/OQ2axVTf/ykqCQgXiIct+mSQDFdH2fkwhPwgEwvJ1kSzZRiinb0zF2Xb8u4+OqPChmyI6MEu4EezNJz+FQ==}
+    hasBin: true
+
   tmp@0.0.33:
     resolution: {integrity: sha512-jRCJlojKnZ3addtTOjdIqoRuPEKBvNXcGYqzO6zWZX8KfKEpnGY5jfggJQ3EjKuu8D4bJRr0y+cYJFmYbImXGw==}
     engines: {node: '>=0.6.0'}
@@ -1101,6 +1110,10 @@ packages:
   tough-cookie@2.5.0:
     resolution: {integrity: sha512-nlLsUzgm1kfLXSXfRZMc1KLAugd4hqJHDTvc2hDIwS3mZAfMEuMbc03SujMF+GEcpaX/qboeycw6iO8JwVv2+g==}
     engines: {node: '>=0.8'}
+
+  tough-cookie@5.1.2:
+    resolution: {integrity: sha512-FVDYdxtnj0G6Qm/DhNPSb8Ju59ULcup3tuJxkFb5K8Bv2pUXILbf0xZWU8PX8Ov19OXljbUyveOFwRMwkXzO+A==}
+    engines: {node: '>=16'}
 
   tr46@0.0.3:
     resolution: {integrity: sha512-N3WMsuqV66lT30CrXNbEjx4GEwlow3v6rr4mCcv6prnfwhS01rkgyFdjPNBYd9br7LpXV1+Emh01fHnq2Gdgrw==}
@@ -1275,18 +1288,18 @@ snapshots:
 
   aws4@1.13.2: {}
 
-  axios-cookiejar-support@6.0.4(axios@1.12.2)(tough-cookie@2.5.0)(undici@7.16.0):
+  axios-cookiejar-support@6.0.4(axios@1.12.2)(tough-cookie@5.1.2)(undici@7.16.0):
     dependencies:
       axios: 1.12.2(debug@4.3.7)
-      http-cookie-agent: 7.0.2(tough-cookie@2.5.0)(undici@7.16.0)
-      tough-cookie: 2.5.0
+      http-cookie-agent: 7.0.2(tough-cookie@5.1.2)(undici@7.16.0)
+      tough-cookie: 5.1.2
     transitivePeerDependencies:
       - undici
 
   axios@0.27.2:
     dependencies:
       follow-redirects: 1.15.9(debug@4.3.7)
-      form-data: 4.0.1
+      form-data: 4.0.4
     transitivePeerDependencies:
       - debug
 
@@ -1652,12 +1665,6 @@ snapshots:
       combined-stream: 1.0.8
       mime-types: 2.1.35
 
-  form-data@4.0.1:
-    dependencies:
-      asynckit: 0.4.0
-      combined-stream: 1.0.8
-      mime-types: 2.1.35
-
   form-data@4.0.4:
     dependencies:
       asynckit: 0.4.0
@@ -1742,7 +1749,7 @@ snapshots:
 
   has-tostringtag@1.0.2:
     dependencies:
-      has-symbols: 1.0.3
+      has-symbols: 1.1.0
 
   hasown@2.0.2:
     dependencies:
@@ -1755,10 +1762,10 @@ snapshots:
       domutils: 3.2.2
       entities: 6.0.1
 
-  http-cookie-agent@7.0.2(tough-cookie@2.5.0)(undici@7.16.0):
+  http-cookie-agent@7.0.2(tough-cookie@5.1.2)(undici@7.16.0):
     dependencies:
       agent-base: 7.1.4
-      tough-cookie: 2.5.0
+      tough-cookie: 5.1.2
     optionalDependencies:
       undici: 7.16.0
 
@@ -2276,6 +2283,12 @@ snapshots:
 
   through@2.3.8: {}
 
+  tldts-core@6.1.86: {}
+
+  tldts@6.1.86:
+    dependencies:
+      tldts-core: 6.1.86
+
   tmp@0.0.33:
     dependencies:
       os-tmpdir: 1.0.2
@@ -2292,6 +2305,10 @@ snapshots:
     dependencies:
       psl: 1.14.0
       punycode: 2.3.1
+
+  tough-cookie@5.1.2:
+    dependencies:
+      tldts: 6.1.86
 
   tr46@0.0.3: {}
 
