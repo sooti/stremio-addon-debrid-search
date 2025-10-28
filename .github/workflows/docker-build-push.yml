@@ -45,6 +45,8 @@ jobs:
             TAGS="${INPUT_REF}"
             if [[ "$(git rev-parse origin/main)" = "$(git rev-parse "${INPUT_REF}")" ]]; then
               TAGS="${TAGS} latest"
+            elif [[ "$(git describe --tags --abbrev=0 origin/main)" = "${INPUT_REF}" ]]; then
+              TAGS="${TAGS} latest"
             fi
             ;;
           *)
@@ -57,10 +59,13 @@ jobs:
             exit 1
           fi
 
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_OWNER_LOWER="${REPO_OWNER,,}"
+
           {
             echo 'DOCKER_IMAGE_TAGS<<EOF'
             for tag in ${TAGS}; do
-            echo "ghcr.io/${{ github.repository_owner }}/stremio-addon-debrid-search:${tag}"
+            echo "ghcr.io/${REPO_OWNER_LOWER}/stremio-addon-debrid-search:${tag}"
             done
             echo EOF
           } >> "${GITHUB_ENV}"
