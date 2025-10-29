@@ -13,5 +13,5 @@ services:
       - .env
     environment:
       - NODE_ENV=production
-    command: ["npm", "run", "start"]
+    command: ["npm", "run", "dev"]
     restart: unless-stopped
