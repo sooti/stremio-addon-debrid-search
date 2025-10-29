@@ -7,8 +7,7 @@ services:
       dockerfile: Dockerfile
     image: sootio
     container_name: sootio
-    ports:
-      - "${PORT:-6907}:${PORT:-6907}"
+    network_mode: host
     env_file:
       - .env
     environment:
