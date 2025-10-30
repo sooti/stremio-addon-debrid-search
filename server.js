@@ -198,7 +198,18 @@ for (const sig of ["SIGINT","SIGTERM"]) {
 
         console.log(`[SERVER] Received ${sig}. Shutting down gracefully...`);
 
-        // Close MongoDB connections first
+        // Clear all intervals and timeouts
+        try {
+            if (cleanupIntervalId) clearInterval(cleanupIntervalId);
+            if (autoCleanIntervalId) clearInterval(autoCleanIntervalId);
+            if (autoCleanTimeoutId) clearTimeout(autoCleanTimeoutId);
+            if (monitorIntervalId) clearInterval(monitorIntervalId);
+            console.log('[SERVER] All intervals and timeouts cleared');
+        } catch (error) {
+            console.error(`[SERVER] Error clearing intervals: ${error.message}`);
+        }
+
+        // Close MongoDB connections
         try {
             await Promise.all([
                 mongoCache.closeMongo(),
@@ -587,7 +598,7 @@ async function cleanupInactiveStreams() {
 }
 
 // Schedule cleanup every 15 minutes
-setInterval(() => {
+const cleanupIntervalId = setInterval(() => {
     cleanupInactiveStreams().catch(err => {
         console.error('[USENET-CLEANUP] Error during cleanup:', err.message);
     });
@@ -677,14 +688,14 @@ async function autoCleanOldFiles() {
 
 // Schedule auto-clean every hour
 const AUTO_CLEAN_INTERVAL = 60 * 60 * 1000; // 1 hour
-setInterval(() => {
+const autoCleanIntervalId = setInterval(() => {
     autoCleanOldFiles().catch(err => {
         console.error('[USENET-AUTO-CLEAN] Error during auto-clean:', err.message);
     });
 }, AUTO_CLEAN_INTERVAL);
 
 // Run auto-clean on startup after 5 minutes
-setTimeout(() => {
+const autoCleanTimeoutId = setTimeout(() => {
     autoCleanOldFiles().catch(err => {
         console.error('[USENET-AUTO-CLEAN] Error during startup auto-clean:', err.message);
     });
@@ -758,7 +769,7 @@ async function monitorStreamDownloads() {
 
 // Schedule monitoring every 30 seconds
 const STREAM_MONITOR_INTERVAL = 30 * 1000; // 30 seconds
-setInterval(() => {
+const monitorIntervalId = setInterval(() => {
     monitorStreamDownloads().catch(err => {
         console.error('[USENET-MONITOR] Error during monitoring:', err.message);
     });

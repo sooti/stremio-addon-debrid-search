@@ -59,6 +59,10 @@ if (cluster.isMaster) {
     // Import server.js and start the server explicitly in worker process
     let mongoCache = null;
     let cacheDb = null;
+    let rdRateLimiter = null;
+    let adRateLimiter = null;
+    let proxyManager = null;
+    let personalFilesCache = null;
 
     try {
         const { app, server, PORT, HOST } = await import('./server.js');
@@ -66,6 +70,16 @@ if (cluster.isMaster) {
         // Import MongoDB modules for cleanup
         mongoCache = await import('./lib/common/mongo-cache.js');
         cacheDb = await import('./lib/util/cache-db.js');
+
+        // Import rate limiters for cleanup
+        rdRateLimiter = (await import('./lib/util/rd-rate-limit.js')).default;
+        adRateLimiter = (await import('./lib/util/ad-rate-limit.js')).default;
+
+        // Import proxy manager for cleanup
+        proxyManager = (await import('./lib/util/proxy-manager.js')).default;
+
+        // Import personal files cache for cleanup
+        personalFilesCache = (await import('./lib/util/personal-files-cache.js')).default;
 
         // Start server in worker if it's not already started
         if (!server || server === null) {
@@ -95,7 +109,18 @@ if (cluster.isMaster) {
 
         console.log(`Worker ${process.pid} received ${signal}, shutting down gracefully...`);
 
-        // Close MongoDB connections first
+        // Shutdown rate limiters, proxy manager, and caches to clear intervals
+        try {
+            if (rdRateLimiter) rdRateLimiter.shutdown();
+            if (adRateLimiter) adRateLimiter.shutdown();
+            if (proxyManager) proxyManager.shutdown();
+            if (personalFilesCache) personalFilesCache.shutdown();
+            console.log(`Worker ${process.pid} rate limiters, proxy manager, and cache intervals cleared`);
+        } catch (error) {
+            console.error(`Worker ${process.pid} Error shutting down rate limiters/proxy/cache: ${error.message}`);
+        }
+
+        // Close MongoDB connections
         try {
             if (mongoCache && cacheDb) {
                 await Promise.all([
