@@ -41,7 +41,7 @@
 - **Concurrent Processing**: Parallel scraper execution with smart coordination
 
 ### 🌍 Advanced Features
-- **50+ Language Support**: Multi-audio detection with flag emojis (🇬🇧 🇫🇷 🇪🇸 🇩🇪 etc.)
+- **42 Language Support**: Multi-audio detection with flag emojis (🇬🇧 🇫🇷 🇪🇸 🇩🇪 etc.)
 - **Season Pack Inspection**: Smart episode extraction from season packs
 - **Year-Based Filtering**: Prevents wrong sequel/remake matches
 - **SOCKS5/HTTP Proxy Support**: Per-service proxy configuration (WARP-friendly)
@@ -451,7 +451,7 @@ DEBRID_PROXY_SERVICES=*:true
 ### Cache Checking Support
 | Provider | Method | Speed |
 |----------|--------|-------|
-| Real-Debrid | Hash-based instant | ⚡⚡⚡ Very Fast |
+| Real-Debrid | Hash-based instant | ⚡ Moderate |
 | All-Debrid | Magnet upload + check | ⚡⚡ Fast |
 | OffCloud | Hash-based instant | ⚡⚡⚡ Very Fast |
 | TorBox | Cache check API | ⚡⚡⚡ Very Fast |
@@ -522,7 +522,7 @@ sootio-stremio-addon/
 │   │   └── debrid-cache-processor.js
 │   ├── util/
 │   │   ├── debrid-proxy.js     # Proxy management
-│   │   ├── language-mapping.js # 50+ language support
+│   │   ├── language-mapping.js # 42 language support
 │   │   ├── filter-torrents.js  # Quality filtering
 │   │   └── ...
 │   ├── http-streams.js         # 4KHDHub integration
