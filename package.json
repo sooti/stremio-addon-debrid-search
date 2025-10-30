@@ -1,6 +1,6 @@
 {
 	"name": "Sootio",
-	"version": "1.4.7-4",
+	"version": "1.4.7-5",
 	"description": "Stremio Addon to search downloads and torrents in debrid services",
 	"main": "server.js",
 	"scripts": {
@@ -17,6 +17,8 @@
 		"@torbox/torbox-api": "^1.0.6",
 		"@types/node": "^18.19.67",
 		"all-debrid-api": "^1.2.0",
+		"http-proxy-agent": "^7.0.2",
+		"https-proxy-agent": "^7.0.5",
 		"axios": "^1.7.9",
 		"cheerio": "^1.1.2",
 		"cors": "^2.8.5",
@@ -34,6 +36,7 @@
 		"offcloud-api": "^1.0.2",
 		"parse-torrent-title": "github:TheBeastLT/parse-torrent-title#b98e2ba2fb64fd5fa1c34c620bd9050bbc2e271d",
 		"premiumize-api": "^1.0.3",
+		"socks-proxy-agent": "^8.0.4",
 		"tough-cookie": "^5.0.0",
 		"prom-client": "^14.2.0",
 		"real-debrid-api": "github:MrMonkey42/node-real-debrid#ea885a01e64c5543cda289c7fd1e8981d8c7d650",
