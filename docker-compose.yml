@@ -7,16 +7,10 @@ services:
       dockerfile: Dockerfile
     image: sootio
     container_name: sootio
-    ports:
-      - "${PORT:-6907}:${PORT:-6907}"
+    network_mode: host
     env_file:
       - .env
     environment:
       - NODE_ENV=production
-    volumes:
-      - node_modules:/app/node_modules
-    command: ["node", "server.js"]
+    command: ["npm", "run", "start"]
     restart: unless-stopped
-
-volumes:
-  node_modules:

@@ -3,6 +3,7 @@
 import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
+import { overrideConsole } from './lib/util/logger.js';
 import serverless from './serverless.js';
 import requestIp from 'request-ip';
 import rateLimit from 'express-rate-limit';
@@ -14,6 +15,19 @@ import http from 'http';
 import https from 'https';
 import * as scraperCache from './lib/util/scraper-cache.js';
 import Usenet from './lib/usenet.js';
+import { resolveHttpStreamUrl } from './lib/http-streams.js';
+import { resolveUHDMoviesUrl } from './lib/uhdmovies.js';
+
+// Override console to respect LOG_LEVEL environment variable
+overrideConsole();
+// Import compression if available, otherwise provide a no-op middleware
+let compression = null;
+try {
+  compression = (await import('compression')).default;
+} catch (e) {
+  console.warn('Compression middleware not available, using no-op middleware');
+  compression = () => (req, res, next) => next(); // No-op if compression not available
+}
 import Newznab from './lib/newznab.js';
 import SABnzbd from './lib/sabnzbd.js';
 import fs from 'fs';
@@ -22,6 +36,12 @@ import crypto from 'crypto';
 import { obfuscateSensitive } from './lib/common/torrent-utils.js';
 import { getManifest } from './lib/util/manifest.js';
 import landingTemplate from './lib/util/landingTemplate.js';
+
+// High-performance in-memory cache for frequently accessed cache keys
+// This provides sub-millisecond access times for popular queries
+const FAST_CACHE = new Map();
+const FAST_CACHE_MAX_SIZE = 2000; // Limit to prevent memory issues
+const FAST_CACHE_TTL = 5 * 60 * 1000; // 5 minutes TTL for fast cache
 
 const RESOLVED_URL_CACHE = new Map();
 const PENDING_RESOLVES = new Map();
@@ -128,7 +148,17 @@ const STREAM_CLEANUP_INTERVAL = 2 * 60 * 1000;
 const STREAM_INACTIVE_TIMEOUT = 10 * 60 * 1000; // 10 minutes of inactivity
 
 
+// Performance: Set up connection pooling and reuse
+app.set('trust proxy', true); // Trust proxy headers if behind reverse proxy
+app.set('etag', false); // Disable etag generation for static performance
+
 app.use(cors());
+
+// Performance: Add compression for API responses
+app.use(compression({
+    level: 6, // Balanced compression level
+    threshold: 1024 // Only compress responses larger than 1KB
+}));
 
 // Swagger stats middleware (unchanged)
 app.use(swStats.getMiddleware({
@@ -149,6 +179,13 @@ const rateLimiter = rateLimit({
 try {
     server.keepAliveTimeout = parseInt(process.env.HTTP_KEEPALIVE_TIMEOUT || "65000", 10);
     server.headersTimeout = parseInt(process.env.HTTP_HEADERS_TIMEOUT || "72000", 10);
+    
+    // Additional performance optimizations for HTTP server
+    server.timeout = parseInt(process.env.HTTP_TIMEOUT || "120000", 10); // 2 minutes default
+    server.maxHeadersCount = 50; // Reduce memory usage from headers
+    
+    // Performance: Optimize socket handling
+    server.maxConnections = 200; // Limit concurrent connections to prevent overload
 } catch (_) {}
 
 // Graceful shutdown
@@ -166,6 +203,18 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
     const { debridProvider, debridApiKey, url } = req.params;
     const decodedUrl = decodeURIComponent(url);
     const clientIp = requestIp.getClientIp(req);
+
+    // Extract config from query if provided (for NZB resolution)
+    const configParam = req.query.config;
+    let config = {};
+    if (configParam) {
+        try {
+            config = JSON.parse(decodeURIComponent(configParam));
+        } catch (e) {
+            console.log('[RESOLVER] Failed to parse config from query');
+        }
+    }
+
     // Use provider + hash of URL as cache key to avoid storing decoded URLs with API keys
     const cacheKeyHash = crypto.createHash('md5').update(decodedUrl).digest('hex');
     const cacheKey = `${debridProvider}:${cacheKeyHash}`;
@@ -181,14 +230,34 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
             finalUrl = await PENDING_RESOLVES.get(cacheKey);
         } else {
             console.log(`[RESOLVER] Cache miss. Resolving URL for ${debridProvider}`);
-            const p = streamProvider.resolveUrl(debridProvider, debridApiKey, null, decodedUrl, clientIp);
-            const timed = Promise.race([ p, new Promise((_, rej) => setTimeout(() => rej(new Error('Resolve timeout')), 20000)) ]);
-            PENDING_RESOLVES.set(cacheKey, timed.finally(() => PENDING_RESOLVES.delete(cacheKey)));
-            finalUrl = await timed;
+            const resolvePromise = streamProvider.resolveUrl(debridProvider, debridApiKey, null, decodedUrl, clientIp, config);
+
+            // Set a configurable timeout for performance tuning - increase for NZB downloads
+            const isNzb = decodedUrl.startsWith('nzb:');
+            const timeoutMs = isNzb ? 600000 : parseInt(process.env.RESOLVE_TIMEOUT || '20000', 10); // 10 min for NZB, 20s otherwise
+            const timedResolve = Promise.race([
+                resolvePromise,
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Resolve timeout')), timeoutMs)
+                )
+            ]);
+
+            // Track the pending request
+            const pendingRequest = timedResolve.finally(() => {
+                PENDING_RESOLVES.delete(cacheKey);
+            });
+            PENDING_RESOLVES.set(cacheKey, pendingRequest);
+
+            finalUrl = await pendingRequest;
 
             if (finalUrl) {
                 RESOLVED_URL_CACHE.set(cacheKey, finalUrl);
-                setTimeout(() => RESOLVED_URL_CACHE.delete(cacheKey), 2 * 60 * 60 * 1000);
+
+                // Make cache TTL configurable for better performance tuning
+                const cacheTtlMs = parseInt(process.env.RESOLVE_CACHE_TTL_MS || '7200000', 10); // 2 hours default
+                setTimeout(() => {
+                    RESOLVED_URL_CACHE.delete(cacheKey);
+                }, cacheTtlMs);
             }
         }
 
@@ -204,6 +273,83 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
     } catch (error) {
         console.error("[RESOLVER] A critical error occurred:", error.message);
         res.status(500).send("Error resolving stream.");
+    }
+});
+
+// HTTP Streaming resolver endpoint (for 4KHDHub, UHDMovies, etc.)
+// This endpoint provides lazy resolution - decrypts URLs only when user selects a stream
+app.get('/resolve/httpstreaming/:url', async (req, res) => {
+    const { url } = req.params;
+    const decodedUrl = decodeURIComponent(url);
+
+    // Use hash of URL as cache key
+    const cacheKeyHash = crypto.createHash('md5').update(decodedUrl).digest('hex');
+    const cacheKey = `httpstreaming:${cacheKeyHash}`;
+
+    try {
+        let finalUrl;
+
+        if (RESOLVED_URL_CACHE.has(cacheKey)) {
+            finalUrl = RESOLVED_URL_CACHE.get(cacheKey);
+            console.log(`[HTTP-RESOLVER] Using cached URL for key: ${cacheKeyHash.substring(0, 8)}...`);
+        } else if (PENDING_RESOLVES.has(cacheKey)) {
+            console.log(`[HTTP-RESOLVER] Joining in-flight resolve for key: ${cacheKeyHash.substring(0, 8)}...`);
+            finalUrl = await PENDING_RESOLVES.get(cacheKey);
+        } else {
+            console.log(`[HTTP-RESOLVER] Cache miss. Resolving HTTP stream URL...`);
+
+            // Determine which resolver to use based on URL pattern
+            let resolvePromise;
+            if (decodedUrl.includes('driveleech') || decodedUrl.includes('driveseed') ||
+                decodedUrl.includes('tech.unblockedgames.world') ||
+                decodedUrl.includes('tech.creativeexpressionsblog.com') ||
+                decodedUrl.includes('tech.examzculture.in')) {
+                // UHDMovies SID/driveleech URL
+                console.log(`[HTTP-RESOLVER] Detected UHDMovies URL, using UHDMovies resolver`);
+                resolvePromise = resolveUHDMoviesUrl(decodedUrl);
+            } else {
+                // 4KHDHub/other HTTP streaming URLs
+                console.log(`[HTTP-RESOLVER] Detected 4KHDHub URL, using HTTP stream resolver`);
+                resolvePromise = resolveHttpStreamUrl(decodedUrl);
+            }
+
+            // Set timeout for HTTP stream resolution
+            const timeoutMs = parseInt(process.env.HTTP_RESOLVE_TIMEOUT || '15000', 10); // 15s default
+            const timedResolve = Promise.race([
+                resolvePromise,
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('HTTP resolve timeout')), timeoutMs)
+                )
+            ]);
+
+            // Track the pending request
+            const pendingRequest = timedResolve.finally(() => {
+                PENDING_RESOLVES.delete(cacheKey);
+            });
+            PENDING_RESOLVES.set(cacheKey, pendingRequest);
+
+            finalUrl = await pendingRequest;
+
+            if (finalUrl) {
+                RESOLVED_URL_CACHE.set(cacheKey, finalUrl);
+
+                // Cache TTL for HTTP streams
+                const cacheTtlMs = parseInt(process.env.HTTP_RESOLVE_CACHE_TTL_MS || '3600000', 10); // 1 hour default
+                setTimeout(() => {
+                    RESOLVED_URL_CACHE.delete(cacheKey);
+                }, cacheTtlMs);
+            }
+        }
+
+        if (finalUrl) {
+            console.log("[HTTP-RESOLVER] Redirecting to final stream URL:", finalUrl.substring(0, 100) + '...');
+            res.redirect(302, finalUrl);
+        } else {
+            res.status(404).send('Could not resolve HTTP stream link');
+        }
+    } catch (error) {
+        console.error("[HTTP-RESOLVER] Error occurred:", error.message);
+        res.status(500).send("Error resolving HTTP stream.");
     }
 });
 
@@ -254,7 +400,18 @@ app.get('/admin/clear-torrent-cache', checkAdminAuth, async (req, res) => {
 // Endpoint to clear ALL MongoDB cache (search results + torrent metadata)
 app.get('/admin/clear-all-cache', checkAdminAuth, async (req, res) => {
     const result = await mongoCache.clearAllCache();
+    // Also clear the fast cache
+    mongoCache.clearFastCache();
     res.json(result);
+});
+
+// Endpoint to clear fast in-memory cache
+app.get('/admin/clear-fast-cache', checkAdminAuth, (req, res) => {
+    mongoCache.clearFastCache();
+    res.json({
+        success: true,
+        message: 'Fast in-memory cache cleared successfully'
+    });
 });
 
 // Endpoint to view active Usenet streams
@@ -766,7 +923,7 @@ async function findVideoFileViaAPI(fileServerUrl, releaseName, options = {}, fil
             return null;
         }
 
-        console.log(`[USENET] Selected largest file: ${largestFile.name} (${(largestFile.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
+        console.log(`[USENET] Selected largest file: ${largestFile.name} (${(largestFile.size / 1024 / 1024 / 1024).toFixed(2)} GB`);
 
         // Use full path with folder so rar2fs can find the extracted file
         return {
@@ -2213,7 +2370,7 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                     while (Date.now() - startWait < maxWait) {
                         await new Promise(resolve => setTimeout(resolve, pollInterval));
 
-                        // Check file size again
+                        // Re-check file size again
                         const newStat = fs.statSync(videoFilePath);
                         console.log(`[USENET] Waiting for file to grow... Current size: ${(newStat.size / 1024 / 1024).toFixed(2)} MB`);
 
@@ -2292,7 +2449,7 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
 });
 
 app.use((req, res, next) => {
-    if (req.path.startsWith('/resolve/')) {
+    if (['/', '/configure', '/manifest-no-catalogs.json'].includes(req.path) || req.path.startsWith('/resolve/')) {
         return next();
     }
     serverless(req, res, next);
