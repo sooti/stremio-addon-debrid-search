@@ -11,6 +11,7 @@ import swStats from 'swagger-stats';
 import addonInterface from "./addon.js";
 import streamProvider from './lib/stream-provider.js';
 import * as mongoCache from './lib/common/mongo-cache.js';
+import * as cacheDb from './lib/util/cache-db.js';
 import http from 'http';
 import https from 'https';
 import * as scraperCache from './lib/util/scraper-cache.js';
@@ -188,12 +189,37 @@ try {
     server.maxConnections = 200; // Limit concurrent connections to prevent overload
 } catch (_) {}
 
-// Graceful shutdown
+// Graceful shutdown - properly close all connections
+let isShuttingDown = false;
 for (const sig of ["SIGINT","SIGTERM"]) {
-    process.on(sig, () => {
-        console.log(`[SERVER] Received ${sig}. Shutting down...`);
-        server.close(() => process.exit(0));
-        setTimeout(() => process.exit(1), 10000).unref();
+    process.on(sig, async () => {
+        if (isShuttingDown) return; // Prevent multiple shutdown attempts
+        isShuttingDown = true;
+
+        console.log(`[SERVER] Received ${sig}. Shutting down gracefully...`);
+
+        // Close MongoDB connections first
+        try {
+            await Promise.all([
+                mongoCache.closeMongo(),
+                cacheDb.closeConnection()
+            ]);
+            console.log('[SERVER] All MongoDB connections closed');
+        } catch (error) {
+            console.error(`[SERVER] Error closing MongoDB connections: ${error.message}`);
+        }
+
+        // Then close HTTP server
+        server.close(() => {
+            console.log('[SERVER] HTTP server closed');
+            process.exit(0);
+        });
+
+        // Force exit after 10 seconds if graceful shutdown fails
+        setTimeout(() => {
+            console.error('[SERVER] Forced shutdown after timeout');
+            process.exit(1);
+        }, 10000).unref();
     });
 }
 app.use(rateLimiter);

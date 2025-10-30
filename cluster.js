@@ -55,20 +55,27 @@ if (cluster.isMaster) {
 } else {
     // Worker processes
     console.log(`Worker ${process.pid} started`);
-    
+
     // Import server.js and start the server explicitly in worker process
+    let mongoCache = null;
+    let cacheDb = null;
+
     try {
         const { app, server, PORT, HOST } = await import('./server.js');
-        
+
+        // Import MongoDB modules for cleanup
+        mongoCache = await import('./lib/common/mongo-cache.js');
+        cacheDb = await import('./lib/util/cache-db.js');
+
         // Start server in worker if it's not already started
         if (!server || server === null) {
             const port = PORT;
             const host = HOST;
-            
+
             const workerServer = app.listen(port, host, () => {
                 console.log(`Worker ${process.pid} server listening on port ${port}`);
             });
-            
+
             // Export server for the worker process to use for cleanup
             global.workerServer = workerServer;
         } else {
@@ -80,27 +87,44 @@ if (cluster.isMaster) {
     }
 
     // Handle graceful shutdown for workers
-    process.on('SIGINT', () => {
-        console.log(`Worker ${process.pid} received SIGINT, shutting down...`);
-        if (global.workerServer) {
-            global.workerServer.close(() => {
-                console.log(`Worker ${process.pid} server closed`);
-                process.exit(0);
-            });
-        } else {
-            process.exit(0);
-        }
-    });
+    let workerShuttingDown = false;
 
-    process.on('SIGTERM', () => {
-        console.log(`Worker ${process.pid} received SIGTERM, shutting down...`);
+    const gracefulWorkerShutdown = async (signal) => {
+        if (workerShuttingDown) return;
+        workerShuttingDown = true;
+
+        console.log(`Worker ${process.pid} received ${signal}, shutting down gracefully...`);
+
+        // Close MongoDB connections first
+        try {
+            if (mongoCache && cacheDb) {
+                await Promise.all([
+                    mongoCache.closeMongo(),
+                    cacheDb.closeConnection()
+                ]);
+                console.log(`Worker ${process.pid} MongoDB connections closed`);
+            }
+        } catch (error) {
+            console.error(`Worker ${process.pid} Error closing MongoDB: ${error.message}`);
+        }
+
+        // Then close HTTP server
         if (global.workerServer) {
             global.workerServer.close(() => {
                 console.log(`Worker ${process.pid} server closed`);
                 process.exit(0);
             });
+
+            // Force exit after 5 seconds
+            setTimeout(() => {
+                console.error(`Worker ${process.pid} forced shutdown`);
+                process.exit(1);
+            }, 5000).unref();
         } else {
             process.exit(0);
         }
-    });
+    };
+
+    process.on('SIGINT', () => gracefulWorkerShutdown('SIGINT'));
+    process.on('SIGTERM', () => gracefulWorkerShutdown('SIGTERM'));
 }
