@@ -86,7 +86,7 @@ When you search for a movie or episode in Stremio:
 
 1. **Clone the repository**
 ```bash
-git clone https://github.com/your-username/sootio-stremio-addon.git
+git clone https://github.com/sooti/sootio-stremio-addon.git
 cd sootio-stremio-addon
 ```
 
@@ -102,7 +102,7 @@ nano .env  # or use your preferred editor
 # Basic setup (no MongoDB)
 docker-compose up -d
 
-# With MongoDB for cache (recommended for All-Debrid)
+# With MongoDB for persistent cache (recommended)
 docker-compose --profile mongodb up -d
 ```
 
@@ -182,10 +182,10 @@ npm run dev
 ### Method 3: Optional MongoDB Setup
 
 MongoDB is **optional** but **highly recommended** for:
-- All-Debrid users (required due to deprecated API endpoints)
 - Multi-user scenarios
 - Persistent cache across restarts
 - Better performance with frequent searches
+- Shared cache across multiple addon instances
 
 #### Local MongoDB with Docker
 ```bash
@@ -231,7 +231,7 @@ DEBRID_DEBUG_LOGS=false
 
 Debrid providers are configured via the **Stremio UI** when installing the addon:
 - Real-Debrid
-- All-Debrid (requires MongoDB)
+- All-Debrid
 - TorBox
 - Premiumize
 - OffCloud
@@ -351,7 +351,7 @@ See `.env.example` for 100+ additional configuration options including:
 | Provider | Cache Check | Personal Cloud | Season Packs | Notes |
 |----------|-------------|----------------|--------------|-------|
 | Real-Debrid | ✅ Hash-based | ✅ | ✅ | Full support |
-| All-Debrid | ✅ Magnet-based | ✅ | ✅ | Requires MongoDB |
+| All-Debrid | ✅ Magnet-based | ✅ | ✅ | Full support |
 | TorBox | ✅ | ✅ | ✅ | Usenet support |
 | OffCloud | ✅ Hash-based | ✅ | ✅ | Full support |
 | Premiumize | ✅ | ✅ | ✅ | Full support |
@@ -448,16 +448,16 @@ DEBRID_PROXY_SERVICES=*:true
 
 ## ⚠️ Important Notes
 
-### All-Debrid Users
-**MongoDB is REQUIRED** for All-Debrid due to deprecated API endpoints. Without MongoDB, All-Debrid will have very limited cache checking capability.
-
 ### Cache Checking Support
 | Provider | Method | Speed |
 |----------|--------|-------|
 | Real-Debrid | Hash-based instant | ⚡⚡⚡ Very Fast |
-| All-Debrid | Magnet upload + check | ⚡⚡ Fast (with MongoDB) |
+| All-Debrid | Magnet upload + check | ⚡⚡ Fast |
 | OffCloud | Hash-based instant | ⚡⚡⚡ Very Fast |
-| Others | Personal cloud only | ⚡ Moderate |
+| TorBox | Cache check API | ⚡⚡⚡ Very Fast |
+| Premiumize | Cache check API | ⚡⚡⚡ Very Fast |
+| Debrider.app | Cache check API | ⚡⚡⚡ Very Fast |
+| Debrid-Link | Personal cloud only | ⚡ Moderate |
 
 ### First Search Performance
 - Initial searches may take 10-30 seconds while caches warm up
