@@ -44,8 +44,72 @@ const FAST_CACHE = new Map();
 const FAST_CACHE_MAX_SIZE = 2000; // Limit to prevent memory issues
 const FAST_CACHE_TTL = 5 * 60 * 1000; // 5 minutes TTL for fast cache
 
+// MEMORY LEAK FIX: Add size limits and proper cleanup for URL caches
 const RESOLVED_URL_CACHE = new Map();
+const RESOLVED_URL_CACHE_MAX_SIZE = 1000; // Prevent unbounded growth
+const CACHE_TIMERS = new Map(); // Track setTimeout IDs for proper cleanup
 const PENDING_RESOLVES = new Map();
+const PENDING_RESOLVES_MAX_SIZE = 500; // Limit concurrent pending requests
+
+// Helper function to evict oldest cache entry (LRU-style FIFO eviction)
+function evictOldestCacheEntry() {
+    if (RESOLVED_URL_CACHE.size >= RESOLVED_URL_CACHE_MAX_SIZE) {
+        const firstKey = RESOLVED_URL_CACHE.keys().next().value;
+        RESOLVED_URL_CACHE.delete(firstKey);
+
+        // Clear associated timer to prevent memory leak
+        const timerId = CACHE_TIMERS.get(firstKey);
+        if (timerId) {
+            clearTimeout(timerId);
+            CACHE_TIMERS.delete(firstKey);
+        }
+
+        console.log(`[CACHE] Evicted oldest entry (cache size: ${RESOLVED_URL_CACHE.size})`);
+    }
+}
+
+// Helper function to set cache with proper timer tracking
+function setCacheWithTimer(cacheKey, value, ttlMs) {
+    // Evict old entries if needed
+    evictOldestCacheEntry();
+
+    // Clear existing timer if re-caching
+    const existingTimer = CACHE_TIMERS.get(cacheKey);
+    if (existingTimer) {
+        clearTimeout(existingTimer);
+    }
+
+    // Set cache value
+    RESOLVED_URL_CACHE.set(cacheKey, value);
+
+    // Set new timer and track it
+    const timerId = setTimeout(() => {
+        RESOLVED_URL_CACHE.delete(cacheKey);
+        CACHE_TIMERS.delete(cacheKey);
+    }, ttlMs);
+
+    CACHE_TIMERS.set(cacheKey, timerId);
+}
+
+// Periodic cleanup for FAST_CACHE (similar to mongo-cache.js)
+let fastCacheCleanupInterval = setInterval(() => {
+    const now = Date.now();
+    let cleaned = 0;
+
+    for (const [key, value] of FAST_CACHE.entries()) {
+        if (value.expires && now >= value.expires) {
+            FAST_CACHE.delete(key);
+            cleaned++;
+        }
+    }
+
+    if (cleaned > 0) {
+        console.log(`[FAST CACHE] Periodic cleanup removed ${cleaned} expired entries (size: ${FAST_CACHE.size})`);
+    }
+}, 2 * 60 * 1000); // Every 2 minutes
+
+// Don't prevent Node.js from exiting
+fastCacheCleanupInterval.unref();
 
 const app = express();
 
@@ -204,7 +268,16 @@ for (const sig of ["SIGINT","SIGTERM"]) {
             if (autoCleanIntervalId) clearInterval(autoCleanIntervalId);
             if (autoCleanTimeoutId) clearTimeout(autoCleanTimeoutId);
             if (monitorIntervalId) clearInterval(monitorIntervalId);
-            console.log('[SERVER] All intervals and timeouts cleared');
+
+            // MEMORY LEAK FIX: Clear fast cache cleanup interval
+            if (fastCacheCleanupInterval) clearInterval(fastCacheCleanupInterval);
+
+            // MEMORY LEAK FIX: Clear all pending cache timers
+            for (const timerId of CACHE_TIMERS.values()) {
+                clearTimeout(timerId);
+            }
+            CACHE_TIMERS.clear();
+            console.log('[SERVER] All intervals, timeouts, and cache timers cleared');
         } catch (error) {
             console.error(`[SERVER] Error clearing intervals: ${error.message}`);
         }
@@ -279,6 +352,13 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
                 )
             ]);
 
+            // MEMORY LEAK FIX: Limit pending requests to prevent unbounded growth
+            if (PENDING_RESOLVES.size >= PENDING_RESOLVES_MAX_SIZE) {
+                const oldestKey = PENDING_RESOLVES.keys().next().value;
+                PENDING_RESOLVES.delete(oldestKey);
+                console.log(`[RESOLVER] Evicted oldest pending request (size: ${PENDING_RESOLVES.size})`);
+            }
+
             // Track the pending request
             const pendingRequest = timedResolve.finally(() => {
                 PENDING_RESOLVES.delete(cacheKey);
@@ -288,13 +368,10 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
             finalUrl = await pendingRequest;
 
             if (finalUrl) {
-                RESOLVED_URL_CACHE.set(cacheKey, finalUrl);
-
+                // MEMORY LEAK FIX: Use new cache function with proper timer tracking
                 // Make cache TTL configurable for better performance tuning
-                const cacheTtlMs = parseInt(process.env.RESOLVE_CACHE_TTL_MS || '7200000', 10); // 2 hours default
-                setTimeout(() => {
-                    RESOLVED_URL_CACHE.delete(cacheKey);
-                }, cacheTtlMs);
+                const cacheTtlMs = parseInt(process.env.RESOLVE_CACHE_TTL_MS || '900000', 10); // 15 min default (reduced from 2 hours)
+                setCacheWithTimer(cacheKey, finalUrl, cacheTtlMs);
             }
         }
 
@@ -359,6 +436,13 @@ app.get('/resolve/httpstreaming/:url', async (req, res) => {
                 )
             ]);
 
+            // MEMORY LEAK FIX: Limit pending requests to prevent unbounded growth
+            if (PENDING_RESOLVES.size >= PENDING_RESOLVES_MAX_SIZE) {
+                const oldestKey = PENDING_RESOLVES.keys().next().value;
+                PENDING_RESOLVES.delete(oldestKey);
+                console.log(`[HTTP-RESOLVER] Evicted oldest pending request (size: ${PENDING_RESOLVES.size})`);
+            }
+
             // Track the pending request
             const pendingRequest = timedResolve.finally(() => {
                 PENDING_RESOLVES.delete(cacheKey);
@@ -368,13 +452,10 @@ app.get('/resolve/httpstreaming/:url', async (req, res) => {
             finalUrl = await pendingRequest;
 
             if (finalUrl) {
-                RESOLVED_URL_CACHE.set(cacheKey, finalUrl);
-
+                // MEMORY LEAK FIX: Use new cache function with proper timer tracking
                 // Cache TTL for HTTP streams
-                const cacheTtlMs = parseInt(process.env.HTTP_RESOLVE_CACHE_TTL_MS || '3600000', 10); // 1 hour default
-                setTimeout(() => {
-                    RESOLVED_URL_CACHE.delete(cacheKey);
-                }, cacheTtlMs);
+                const cacheTtlMs = parseInt(process.env.HTTP_RESOLVE_CACHE_TTL_MS || '600000', 10); // 10 min default (reduced from 1 hour)
+                setCacheWithTimer(cacheKey, finalUrl, cacheTtlMs);
             }
         }
 
