@@ -7,10 +7,18 @@ services:
       dockerfile: Dockerfile
     image: sootio
     container_name: sootio
-    network_mode: host
+    ports:
+      - "55771:55771"
+    networks:
+      - sootio-network
     env_file:
       - .env
     environment:
       - NODE_ENV=production
     command: ["npm", "run", "start"]
     restart: unless-stopped
+
+networks:
+  sootio-network:
+    driver: bridge
+    name: sootio-network
