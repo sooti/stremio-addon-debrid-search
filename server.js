@@ -244,13 +244,17 @@ const rateLimiter = rateLimit({
 try {
     server.keepAliveTimeout = parseInt(process.env.HTTP_KEEPALIVE_TIMEOUT || "65000", 10);
     server.headersTimeout = parseInt(process.env.HTTP_HEADERS_TIMEOUT || "72000", 10);
-    
+
     // Additional performance optimizations for HTTP server
     server.timeout = parseInt(process.env.HTTP_TIMEOUT || "120000", 10); // 2 minutes default
-    server.maxHeadersCount = 50; // Reduce memory usage from headers
-    
-    // Performance: Optimize socket handling
-    server.maxConnections = 200; // Limit concurrent connections to prevent overload
+    server.maxHeadersCount = parseInt(process.env.HTTP_MAX_HEADERS_COUNT || "50", 10); // Reduce memory usage from headers
+
+    // Performance: Optimize socket handling for multi-user support
+    // Increased default from 200 to 500 for better scalability
+    // Each user typically uses 1-2 concurrent connections
+    server.maxConnections = parseInt(process.env.HTTP_MAX_CONNECTIONS || "500", 10);
+
+    console.log(`[SERVER] HTTP Configuration: maxConnections=${server.maxConnections}, keepAliveTimeout=${server.keepAliveTimeout}ms, timeout=${server.timeout}ms`);
 } catch (_) {}
 
 // Graceful shutdown - properly close all connections
