@@ -20,6 +20,72 @@ import Usenet from './lib/usenet.js';
 import { resolveHttpStreamUrl } from './lib/http-streams.js';
 import { resolveUHDMoviesUrl } from './lib/uhdmovies.js';
 
+// Initialize Redis for shared caching across worker processes
+let redis = null;
+let redisPublisher = null;
+let redisSubscriber = null;
+
+// Check if Redis is enabled
+if (process.env.REDIS_URL) {
+  try {
+    const { Redis } = await import('ioredis');
+    
+    // Redis for primary operations
+    redis = new Redis(process.env.REDIS_URL, {
+      maxRetriesPerRequest: 3,
+      retryDelayOnFailover: 100,
+      retryAttempts: 3,
+      connectTimeout: 10000,
+      lazyConnect: true, // Don't connect immediately
+      enableReadyCheck: true,
+      maxScriptsCachingSize: 1000,
+    });
+    
+    // Redis publisher for pub/sub operations
+    redisPublisher = new Redis(process.env.REDIS_URL, {
+      maxRetriesPerRequest: 3,
+      connectTimeout: 5000,
+      lazyConnect: true,
+    });
+    
+    // Redis subscriber for pub/sub operations  
+    redisSubscriber = new Redis(process.env.REDIS_URL, {
+      maxRetriesPerRequest: 3,
+      connectTimeout: 5000,
+      lazyConnect: true,
+    });
+    
+    // Handle connection events
+    redis.on('connect', () => {
+      console.log('[REDIS] Connected to Redis server');
+    });
+    
+    redis.on('error', (err) => {
+      console.error('[REDIS] Connection error:', err.message);
+    });
+    
+    redis.on('reconnecting', () => {
+      console.log('[REDIS] Reconnecting to Redis server...');
+    });
+    
+    // Connect to Redis
+    await Promise.all([
+      redis.connect(),
+      redisPublisher.connect(),
+      redisSubscriber.connect()
+    ]);
+    
+    console.log('[REDIS] Redis connection established for shared caching');
+  } catch (error) {
+    console.warn('[REDIS] Failed to connect to Redis, continuing without shared cache:', error.message);
+    redis = null;
+    redisPublisher = null;
+    redisSubscriber = null;
+  }
+} else {
+  console.log('[REDIS] Redis URL not configured, using local cache only');
+}
+
 // Override console to respect LOG_LEVEL environment variable
 overrideConsole();
 // Import compression if available, otherwise provide a no-op middleware
@@ -42,11 +108,12 @@ import landingTemplate from './lib/util/landingTemplate.js';
 
 
 // MEMORY LEAK FIX: Add size limits and proper cleanup for URL caches
+// Use Redis for shared caching across workers, fallback to in-memory
 const RESOLVED_URL_CACHE = new Map();
-const RESOLVED_URL_CACHE_MAX_SIZE = 1000; // Prevent unbounded growth
+const RESOLVED_URL_CACHE_MAX_SIZE = 2000; // Increased for better performance
 const CACHE_TIMERS = new Map(); // Track setTimeout IDs for proper cleanup
 const PENDING_RESOLVES = new Map();
-const PENDING_RESOLVES_MAX_SIZE = 500; // Limit concurrent pending requests
+const PENDING_RESOLVES_MAX_SIZE = 1000; // Increased for better multi-user support
 
 // Helper function to evict oldest cache entry (LRU-style FIFO eviction)
 function evictOldestCacheEntry() {
@@ -66,7 +133,8 @@ function evictOldestCacheEntry() {
 }
 
 // Helper function to set cache with proper timer tracking
-function setCacheWithTimer(cacheKey, value, ttlMs) {
+// Now supports both Redis and in-memory caching
+async function setCacheWithTimer(cacheKey, value, ttlMs) {
     // Evict old entries if needed
     evictOldestCacheEntry();
 
@@ -76,16 +144,62 @@ function setCacheWithTimer(cacheKey, value, ttlMs) {
         clearTimeout(existingTimer);
     }
 
-    // Set cache value
-    RESOLVED_URL_CACHE.set(cacheKey, value);
+    // Set cache value in both Redis (if available) and local memory
+    if (redis) {
+        try {
+            await redis.setex(`url:${cacheKey}`, Math.floor(ttlMs / 1000), JSON.stringify(value));
+        } catch (error) {
+            console.error('[REDIS] Error setting cached value:', error.message);
+            // Fallback to local cache
+            RESOLVED_URL_CACHE.set(cacheKey, value);
+        }
+    } else {
+        // Use local cache only
+        RESOLVED_URL_CACHE.set(cacheKey, value);
+    }
 
     // Set new timer and track it
-    const timerId = setTimeout(() => {
+    const timerId = setTimeout(async () => {
+        if (redis) {
+            try {
+                await redis.del(`url:${cacheKey}`);
+            } catch (error) {
+                console.error('[REDIS] Error deleting cached value:', error.message);
+            }
+        }
         RESOLVED_URL_CACHE.delete(cacheKey);
         CACHE_TIMERS.delete(cacheKey);
     }, ttlMs);
 
     CACHE_TIMERS.set(cacheKey, timerId);
+}
+
+// Helper function to get cached value, checking both Redis and local cache
+async function getCacheValue(cacheKey) {
+    let value = null;
+    
+    // Try Redis first if available
+    if (redis) {
+        try {
+            const redisValue = await redis.get(`url:${cacheKey}`);
+            if (redisValue !== null) {
+                value = JSON.parse(redisValue);
+                console.log(`[CACHE] Redis cache hit for key: ${cacheKey.substring(0, 8)}...`);
+                return value;
+            }
+        } catch (error) {
+            console.error('[REDIS] Error getting cached value:', error.message);
+        }
+    }
+    
+    // Fallback to local cache
+    if (RESOLVED_URL_CACHE.has(cacheKey)) {
+        value = RESOLVED_URL_CACHE.get(cacheKey);
+        console.log(`[CACHE] Local cache hit for key: ${cacheKey.substring(0, 8)}...`);
+        return value;
+    }
+    
+    return null;
 }
 
 
@@ -275,6 +389,24 @@ for (const sig of ["SIGINT","SIGTERM"]) {
             console.error(`[SERVER] Error closing MongoDB connections: ${error.message}`);
         }
 
+        // Close Redis connections if available
+        try {
+            if (redis) {
+                await redis.quit();
+                console.log('[REDIS] Redis client disconnected');
+            }
+            if (redisPublisher) {
+                await redisPublisher.quit();
+                console.log('[REDIS] Redis publisher disconnected');
+            }
+            if (redisSubscriber) {
+                await redisSubscriber.quit();
+                console.log('[REDIS] Redis subscriber disconnected');
+            }
+        } catch (error) {
+            console.error('[REDIS] Error closing Redis connections:', error.message);
+        }
+
         // Then close HTTP server
         server.close(() => {
             console.log('[SERVER] HTTP server closed');
@@ -314,8 +446,9 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
     try {
         let finalUrl;
 
-        if (RESOLVED_URL_CACHE.has(cacheKey)) {
-            finalUrl = RESOLVED_URL_CACHE.get(cacheKey);
+        const cachedValue = await getCacheValue(cacheKey);
+        if (cachedValue) {
+            finalUrl = cachedValue;
             console.log(`[CACHE] Using cached URL for key: ${debridProvider}:${cacheKeyHash.substring(0, 8)}...`);
         } else if (PENDING_RESOLVES.has(cacheKey)) {
             console.log(`[RESOLVER] Joining in-flight resolve for key: ${debridProvider}:${cacheKeyHash.substring(0, 8)}...`);
@@ -353,7 +486,7 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
                 // MEMORY LEAK FIX: Use new cache function with proper timer tracking
                 // Make cache TTL configurable for better performance tuning
                 const cacheTtlMs = parseInt(process.env.RESOLVE_CACHE_TTL_MS || '900000', 10); // 15 min default (reduced from 2 hours)
-                setCacheWithTimer(cacheKey, finalUrl, cacheTtlMs);
+                await setCacheWithTimer(cacheKey, finalUrl, cacheTtlMs);
             }
         }
 
@@ -385,8 +518,9 @@ app.get('/resolve/httpstreaming/:url', async (req, res) => {
     try {
         let finalUrl;
 
-        if (RESOLVED_URL_CACHE.has(cacheKey)) {
-            finalUrl = RESOLVED_URL_CACHE.get(cacheKey);
+        const cachedValue = await getCacheValue(cacheKey);
+        if (cachedValue) {
+            finalUrl = cachedValue;
             console.log(`[HTTP-RESOLVER] Using cached URL for key: ${cacheKeyHash.substring(0, 8)}...`);
         } else if (PENDING_RESOLVES.has(cacheKey)) {
             console.log(`[HTTP-RESOLVER] Joining in-flight resolve for key: ${cacheKeyHash.substring(0, 8)}...`);
@@ -437,7 +571,7 @@ app.get('/resolve/httpstreaming/:url', async (req, res) => {
                 // MEMORY LEAK FIX: Use new cache function with proper timer tracking
                 // Cache TTL for HTTP streams
                 const cacheTtlMs = parseInt(process.env.HTTP_RESOLVE_CACHE_TTL_MS || '600000', 10); // 10 min default (reduced from 1 hour)
-                setCacheWithTimer(cacheKey, finalUrl, cacheTtlMs);
+                await setCacheWithTimer(cacheKey, finalUrl, cacheTtlMs);
             }
         }
 

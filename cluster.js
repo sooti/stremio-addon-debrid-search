@@ -69,9 +69,11 @@ if (cluster.isMaster) {
     let adRateLimiter = null;
     let proxyManager = null;
     let personalFilesCache = null;
+    let serverInstance = null;
 
     try {
-        const { app, server, PORT, HOST } = await import('./server.js');
+        const serverModule = await import('./server.js');
+        const { app, server, PORT, HOST } = serverModule;
 
         // Import MongoDB modules for cleanup
         mongoCache = await import('./lib/common/mongo-cache.js');
@@ -86,6 +88,9 @@ if (cluster.isMaster) {
 
         // Import personal files cache for cleanup
         personalFilesCache = (await import('./lib/util/personal-files-cache.js')).default;
+
+        // Get server instance from server module
+        serverInstance = server;
 
         // Start memory monitoring in worker process
         memoryMonitor.startMonitoring();
@@ -144,6 +149,25 @@ if (cluster.isMaster) {
 
         // Stop memory monitoring
         memoryMonitor.stopMonitoring();
+
+        // Close Redis connections if available in the server module
+        try {
+            const serverModule = await import('./server.js');
+            if (serverModule.redis) {
+                await serverModule.redis.quit();
+                console.log(`[REDIS] Worker ${process.pid} Redis client disconnected`);
+            }
+            if (serverModule.redisPublisher) {
+                await serverModule.redisPublisher.quit();
+                console.log(`[REDIS] Worker ${process.pid} Redis publisher disconnected`);
+            }
+            if (serverModule.redisSubscriber) {
+                await serverModule.redisSubscriber.quit();
+                console.log(`[REDIS] Worker ${process.pid} Redis subscriber disconnected`);
+            }
+        } catch (error) {
+            console.error(`[REDIS] Worker ${process.pid} Error closing Redis connections:`, error.message);
+        }
 
         // Then close HTTP server
         if (global.workerServer) {
