@@ -98,20 +98,32 @@ builder.defineCatalogHandler((args) => {
                             ...enrichCacheParams()
                         })
                     })
-                    .catch(err => reject(err))
+                    .catch(err => {
+                        console.error(`[CATALOG-HANDLER] Error in searchTorrents: ${err.message}`)
+                        reject(err)
+                    })
             } else {
                 // Standard catalog request
                 CatalogProvider.listTorrents(args.config, args.extra.skip, args.type)
                     .then(metas => {
                         console.log("Response metas: " + JSON.stringify(metas))
                         resolve({
-                            metas
+                            metas,
+                            ...enrichCacheParams()
                         })
                     })
-                    .catch(err => reject(err))
+                    .catch(err => {
+                        console.error(`[CATALOG-HANDLER] Error in listTorrents: ${err.message}`)
+                        reject(err)
+                    })
             }
         } else {
-            reject(new Error('Invalid catalog request'))
+            // For any other catalog requests, return an empty catalog instead of rejecting
+            console.log(`[CATALOG-HANDLER] Unknown catalog ID: ${args.id}. Returning empty catalog.`);
+            resolve({
+                metas: [],
+                ...enrichCacheParams()
+            })
         }
     })
 })
