@@ -39,11 +39,7 @@ import { obfuscateSensitive } from './lib/common/torrent-utils.js';
 import { getManifest } from './lib/util/manifest.js';
 import landingTemplate from './lib/util/landingTemplate.js';
 
-// High-performance in-memory cache for frequently accessed cache keys
-// This provides sub-millisecond access times for popular queries
-const FAST_CACHE = new Map();
-const FAST_CACHE_MAX_SIZE = 2000; // Limit to prevent memory issues
-const FAST_CACHE_TTL = 5 * 60 * 1000; // 5 minutes TTL for fast cache
+
 
 // MEMORY LEAK FIX: Add size limits and proper cleanup for URL caches
 const RESOLVED_URL_CACHE = new Map();
@@ -92,25 +88,7 @@ function setCacheWithTimer(cacheKey, value, ttlMs) {
     CACHE_TIMERS.set(cacheKey, timerId);
 }
 
-// Periodic cleanup for FAST_CACHE (similar to mongo-cache.js)
-let fastCacheCleanupInterval = setInterval(() => {
-    const now = Date.now();
-    let cleaned = 0;
 
-    for (const [key, value] of FAST_CACHE.entries()) {
-        if (value.expires && now >= value.expires) {
-            FAST_CACHE.delete(key);
-            cleaned++;
-        }
-    }
-
-    if (cleaned > 0) {
-        console.log(`[FAST CACHE] Periodic cleanup removed ${cleaned} expired entries (size: ${FAST_CACHE.size})`);
-    }
-}, 2 * 60 * 1000); // Every 2 minutes
-
-// Don't prevent Node.js from exiting
-fastCacheCleanupInterval.unref();
 
 const app = express();
 
@@ -274,8 +252,7 @@ for (const sig of ["SIGINT","SIGTERM"]) {
             if (autoCleanTimeoutId) clearTimeout(autoCleanTimeoutId);
             if (monitorIntervalId) clearInterval(monitorIntervalId);
 
-            // MEMORY LEAK FIX: Clear fast cache cleanup interval
-            if (fastCacheCleanupInterval) clearInterval(fastCacheCleanupInterval);
+
 
             // MEMORY LEAK FIX: Clear all pending cache timers
             for (const timerId of CACHE_TIMERS.values()) {
@@ -523,19 +500,11 @@ app.get('/admin/clear-torrent-cache', checkAdminAuth, async (req, res) => {
 // Endpoint to clear ALL MongoDB cache (search results + torrent metadata)
 app.get('/admin/clear-all-cache', checkAdminAuth, async (req, res) => {
     const result = await mongoCache.clearAllCache();
-    // Also clear the fast cache
-    mongoCache.clearFastCache();
+
     res.json(result);
 });
 
-// Endpoint to clear fast in-memory cache
-app.get('/admin/clear-fast-cache', checkAdminAuth, (req, res) => {
-    mongoCache.clearFastCache();
-    res.json({
-        success: true,
-        message: 'Fast in-memory cache cleared successfully'
-    });
-});
+
 
 // Endpoint to view active Usenet streams
 app.get('/admin/usenet-streams', checkAdminAuth, (req, res) => {
