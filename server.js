@@ -4,6 +4,7 @@ import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
 import { overrideConsole } from './lib/util/logger.js';
+import { memoryMonitor } from './lib/util/memory-monitor.js';
 import serverless from './serverless.js';
 import requestIp from 'request-ip';
 import rateLimit from 'express-rate-limit';
@@ -2592,8 +2593,30 @@ let server = null;
 // Check if we're running directly (not being imported by cluster)
 // For standalone mode, start the server directly
 if (import.meta.url === `file://${__filename}`) {
+    // Start memory monitoring before server starts
+    memoryMonitor.startMonitoring();
+    
     server = app.listen(PORT, HOST, () => {
         console.log('HTTP server listening on port: ' + server.address().port);
+    });
+    
+    // Handle graceful shutdown for standalone mode
+    process.on('SIGINT', () => {
+        console.log('\nShutting down standalone server...');
+        memoryMonitor.stopMonitoring(); // Stop memory monitoring
+        server.close(() => {
+            console.log('Server closed');
+            process.exit(0);
+        });
+    });
+
+    process.on('SIGTERM', () => {
+        console.log('Received SIGTERM, shutting down gracefully...');
+        memoryMonitor.stopMonitoring(); // Stop memory monitoring
+        server.close(() => {
+            console.log('Server closed');
+            process.exit(0);
+        });
     });
 }
 

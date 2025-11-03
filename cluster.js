@@ -3,6 +3,7 @@
 import cluster from 'cluster';
 import os from 'os';
 import { overrideConsole } from './lib/util/logger.js';
+import { memoryMonitor } from './lib/util/memory-monitor.js';
 
 // Override console to respect LOG_LEVEL environment variable
 overrideConsole();
@@ -23,6 +24,9 @@ if (cluster.isMaster) {
     console.log(`Using ${workersToUse} worker processes (max: ${maxWorkers}, CPUs: ${numCPUs})`);
     console.log(`UV_THREADPOOL_SIZE set to: ${process.env.UV_THREADPOOL_SIZE}`);
 
+    // Start memory monitoring in master process
+    memoryMonitor.startMonitoring();
+
     // Fork workers
     for (let i = 0; i < workersToUse; i++) {
         const worker = cluster.fork();
@@ -39,6 +43,7 @@ if (cluster.isMaster) {
     // Graceful shutdown
     process.on('SIGINT', () => {
         console.log('\nShutting down master process...');
+        memoryMonitor.stopMonitoring(); // Stop memory monitoring
         for (const id in cluster.workers) {
             cluster.workers[id].process.kill('SIGTERM');
         }
@@ -47,6 +52,7 @@ if (cluster.isMaster) {
 
     process.on('SIGTERM', () => {
         console.log('Received SIGTERM, shutting down gracefully...');
+        memoryMonitor.stopMonitoring(); // Stop memory monitoring
         for (const id in cluster.workers) {
             cluster.workers[id].process.kill('SIGTERM');
         }
@@ -80,6 +86,9 @@ if (cluster.isMaster) {
 
         // Import personal files cache for cleanup
         personalFilesCache = (await import('./lib/util/personal-files-cache.js')).default;
+
+        // Start memory monitoring in worker process
+        memoryMonitor.startMonitoring();
 
         // Start server in worker if it's not already started
         if (!server || server === null) {
@@ -132,6 +141,9 @@ if (cluster.isMaster) {
         } catch (error) {
             console.error(`Worker ${process.pid} Error closing MongoDB: ${error.message}`);
         }
+
+        // Stop memory monitoring
+        memoryMonitor.stopMonitoring();
 
         // Then close HTTP server
         if (global.workerServer) {
