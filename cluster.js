@@ -64,6 +64,7 @@ if (cluster.isMaster) {
 
     // Import server.js and start the server explicitly in worker process
     let sqliteCache = null;
+    let sqliteHashCache = null;
     let cacheDb = null;
     let rdRateLimiter = null;
     let adRateLimiter = null;
