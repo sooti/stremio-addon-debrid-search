@@ -1,5 +1,24 @@
 #!/usr/bin/env node
 
+// Ensure data directory exists before other imports
+const pathModule = await import('path');
+const { fileURLToPath } = await import('url');
+const { dirname } = await import('path');
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const dataDir = pathModule.join(__dirname, 'data');
+const fsModule = await import('fs');
+
+if (!fsModule.existsSync(dataDir)) {
+    console.log(`[SERVER] Creating data directory: ${dataDir}`);
+    fsModule.mkdirSync(dataDir, { recursive: true });
+    console.log(`[SERVER] Created data directory: ${dataDir}`);
+} else {
+    console.log(`[SERVER] Data directory already exists: ${dataDir}`);
+}
+
 import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
@@ -2675,13 +2694,6 @@ app.use((req, res, next) => {
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = process.env.PORT || 7000;  // Consistent port definition
-
-// Only start server if not being imported by cluster setup
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 let server = null;
 
