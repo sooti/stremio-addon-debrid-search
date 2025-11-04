@@ -35,7 +35,7 @@
 
 ### ⚡ Performance & Scalability
 - **Multi-Worker Clustering**: Up to 32 workers for high-load scenarios (configurable)
-- **Dual-Layer Caching**: 5000-entry in-memory + MongoDB persistent cache
+- **Dual-Layer Caching**: 5000-entry in-memory + SQLite persistent cache
 - **Rate Limiting**: Per-provider rate limit management (250 req/min for RD, 600/min for AD)
 - **Progressive Results**: Returns cached results while fetching fresh data
 - **Concurrent Processing**: Parallel scraper execution with smart coordination
@@ -45,7 +45,7 @@
 - **Season Pack Inspection**: Smart episode extraction from season packs
 - **Year-Based Filtering**: Prevents wrong sequel/remake matches
 - **SOCKS5/HTTP Proxy Support**: Per-service proxy configuration (WARP-friendly)
-- **MongoDB Cache**: Persistent cache with TTL and auto-cleanup
+- **SQLite Cache**: Persistent cache with TTL and auto-cleanup
 - **Usenet Progressive Streaming**: Starts streaming at 3% download completion
 - **HTTP Range Requests**: Full seeking support for all streams
 - **Docker Ready**: Complete Docker + docker-compose setup
@@ -54,6 +54,7 @@
 - **Prometheus Metrics**: Built-in performance monitoring
 - **Configurable Logging**: Debug, info, warn, error levels
 - **Per-Provider Debug Logs**: Detailed debugging for each debrid service
+- **SQLite Cache Debugging**: Detailed logging for SQLite operations and performance
 - **Cache Hit/Miss Tracking**: Monitor cache efficiency
 
 ---
@@ -68,7 +69,7 @@ When you search for a movie or episode in Stremio:
 4. **Smart Filtering** → Applies codec diversity, audio filtering, and quality limits
 5. **Prioritized Ranking** → Sorts by tier, then resolution, then file size
 6. **Early Exit** → Returns results as soon as quality threshold is reached
-7. **Multi-Layer Caching** → Stores results in memory + MongoDB for instant future lookups
+7. **Multi-Layer Caching** → Stores results in memory + SQLite for instant future lookups
 
 **Result**: Streams are ordered from *best → worst* with instant playback and no waiting.
 
@@ -99,11 +100,10 @@ nano .env  # or use your preferred editor
 
 3. **Build and run**
 ```bash
-# Basic setup (no MongoDB)
+# Basic setup (no SQLite)
 docker-compose up -d
 
-# With MongoDB for persistent cache (recommended)
-docker-compose --profile mongodb up -d
+# With SQLite for persistent cache (recommended)
 ```
 
 4. **Access the addon**
@@ -179,35 +179,34 @@ npm run dev
 
 ---
 
-### Method 3: Optional MongoDB Setup
+### Method 3: Optional SQLite Setup
 
-MongoDB is **optional** but **highly recommended** for:
+SQLite is **optional** but **highly recommended** for:
 - Multi-user scenarios
 - Persistent cache across restarts
 - Better performance with frequent searches
 - Shared cache across multiple addon instances
+- Simpler setup (no separate database server needed)
 
-#### Local MongoDB with Docker
-```bash
-# Using docker-compose profile
-docker-compose --profile mongodb up -d
-
-# Or manually
-docker run -d \
-  --name sootio-mongodb \
-  -p 27017:27017 \
-  -v sootio-mongo-data:/data/db \
-  mongo:7
-```
-
-#### Configure MongoDB in .env
+#### Configure SQLite in .env
 ```env
-MONGO_CACHE_ENABLED=true
-MONGO_URI=mongodb://localhost:27017
-MONGO_DB_NAME=sootio
-MONGO_CACHE_COLLECTION=magnet_cache
-MONGO_CACHE_TTL_DAYS=180
+SQLITE_CACHE_ENABLED=true
+SQLITE_CACHE_TTL_DAYS=180
+
+# Optional: Enable detailed SQLite debugging
+SQLITE_DEBUG_LOGS=true
+# Alternative variable name
+DEBUG_SQLITE=true
 ```
+
+SQLite database files will be created automatically in the `data/` directory.
+
+When debugging is enabled, you'll see detailed logs about:
+- Database connection establishment
+- Query execution times
+- Cache hit/miss statistics
+- Bulk operations performance
+- Cleanup job execution
 
 ---
 
@@ -305,13 +304,11 @@ SCRAPER_CACHE_TTL_MOVIE_MIN=360
 SCRAPER_CACHE_TTL_SERIES_MIN=60
 ```
 
-### MongoDB Cache
+### SQLite Cache
 
 ```env
-MONGO_CACHE_ENABLED=true
-MONGO_URI=mongodb://localhost:27017
-MONGO_DB_NAME=sootio
-MONGO_CACHE_TTL_DAYS=180
+SQLITE_CACHE_ENABLED=true
+SQLITE_CACHE_TTL_DAYS=30
 ```
 
 ### Proxy Support
@@ -341,7 +338,7 @@ See `.env.example` for 100+ additional configuration options including:
 - Season pack handling
 - Cache TTL values
 - Request timeouts and retries
-- Debug options
+- Debug options for debrid services and SQLite cache operations
 
 ---
 
@@ -462,12 +459,12 @@ DEBRID_PROXY_SERVICES=*:true
 ### First Search Performance
 - Initial searches may take 10-30 seconds while caches warm up
 - Subsequent searches are instant (served from cache)
-- MongoDB cache persists across restarts
+- SQLite cache persists across restarts
 
 ### Recommended Settings
-- **Single user**: 4-6 workers, MongoDB optional
-- **Multi-user (5-10)**: 10-16 workers, MongoDB required
-- **High load (50+)**: 24-32 workers, MongoDB + Redis recommended
+- **Single user**: 4-6 workers, SQLite optional
+- **Multi-user (5-10)**: 10-16 workers, SQLite recommended
+- **High load (50+)**: 24-32 workers, SQLite + Redis recommended
 
 ---
 
@@ -518,7 +515,7 @@ sootio-stremio-addon/
 │   ├── {provider}.js           # Debrid provider integrations (7)
 │   ├── common/
 │   │   ├── scrapers.js         # All torrent scrapers (14)
-│   │   ├── mongo-cache.js      # MongoDB cache layer
+│   │   ├── sqlite-cache.js      # SQLite cache layer
 │   │   └── debrid-cache-processor.js
 │   ├── util/
 │   │   ├── debrid-proxy.js     # Proxy management

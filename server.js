@@ -11,8 +11,8 @@ import rateLimit from 'express-rate-limit';
 import swStats from 'swagger-stats';
 import addonInterface from "./addon.js";
 import streamProvider from './lib/stream-provider.js';
-import * as mongoCache from './lib/common/mongo-cache.js';
-import * as cacheDb from './lib/util/cache-db.js';
+import * as sqliteCache from './lib/util/sqlite-cache.js';
+import * as sqliteHashCache from './lib/util/sqlite-hash-cache.js';
 import http from 'http';
 import https from 'https';
 import * as scraperCache from './lib/util/scraper-cache.js';
@@ -378,15 +378,15 @@ for (const sig of ["SIGINT","SIGTERM"]) {
             console.error(`[SERVER] Error clearing intervals: ${error.message}`);
         }
 
-        // Close MongoDB connections
+        // Close SQLite connections
         try {
             await Promise.all([
-                mongoCache.closeMongo(),
-                cacheDb.closeConnection()
+                sqliteCache.closeSqlite(),
+                sqliteHashCache.closeConnection()
             ]);
-            console.log('[SERVER] All MongoDB connections closed');
+            console.log('[SERVER] All SQLite connections closed');
         } catch (error) {
-            console.error(`[SERVER] Error closing MongoDB connections: ${error.message}`);
+            console.error(`[SERVER] Error closing SQLite connections: ${error.message}`);
         }
 
         // Close Redis connections if available
@@ -618,22 +618,22 @@ app.get('/admin/clear-scraper-cache', checkAdminAuth, (req, res) => {
     });
 });
 
-// Endpoint to clear MongoDB search cache (stream results)
+// Endpoint to clear SQLite search cache (stream results)
 app.get('/admin/clear-search-cache', checkAdminAuth, async (req, res) => {
-    const result = await mongoCache.clearSearchCache();
+    const result = await sqliteCache.clearSearchCache();
     res.json(result);
 });
 
-// Endpoint to clear MongoDB torrent hash cache (optionally for specific service)
+// Endpoint to clear SQLite torrent hash cache (optionally for specific service)
 app.get('/admin/clear-torrent-cache', checkAdminAuth, async (req, res) => {
     const service = req.query.service; // Optional: ?service=realdebrid or ?service=alldebrid
-    const result = await mongoCache.clearTorrentCache(service);
+    const result = await sqliteCache.clearTorrentCache(service);
     res.json(result);
 });
 
-// Endpoint to clear ALL MongoDB cache (search results + torrent metadata)
+// Endpoint to clear ALL SQLite cache (search results + torrent metadata)
 app.get('/admin/clear-all-cache', checkAdminAuth, async (req, res) => {
-    const result = await mongoCache.clearAllCache();
+    const result = await sqliteCache.clearAllCache();
 
     res.json(result);
 });
@@ -2726,10 +2726,18 @@ if (import.meta.url === `file://${__filename}`) {
 // Export for cluster usage
 export { app, server, PORT, HOST };
 
-if (mongoCache?.isEnabled()) {
-    mongoCache.initMongo().then(() => {
-        console.log('[CACHE] MongoDB cache initialized');
+if (sqliteCache?.isEnabled()) {
+    sqliteCache.initSqlite().then(() => {
+        console.log('[CACHE] SQLite cache initialized');
     }).catch(err => {
-        console.error('[CACHE] MongoDB init failed:', err?.message || err);
+        console.error('[CACHE] SQLite init failed:', err?.message || err);
+    });
+}
+
+if (sqliteHashCache?.isEnabled()) {
+    sqliteHashCache.initCleanup().then(() => {
+        console.log('[HASH-CACHE] SQLite hash cache cleanup initialized');
+    }).catch(err => {
+        console.error('[HASH-CACHE] SQLite hash cache init failed:', err?.message || err);
     });
 }

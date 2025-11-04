@@ -173,7 +173,7 @@ When the player seeks:
 
 ## Caching
 
-The add-on implements MongoDB caching to reduce API calls:
+The add-on implements SQLite caching to reduce API calls:
 - **Search results**: Cached for 1 hour
 - **NZB file contents**: Cached for 24 hours
 

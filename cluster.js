@@ -63,7 +63,7 @@ if (cluster.isMaster) {
     console.log(`Worker ${process.pid} started`);
 
     // Import server.js and start the server explicitly in worker process
-    let mongoCache = null;
+    let sqliteCache = null;
     let cacheDb = null;
     let rdRateLimiter = null;
     let adRateLimiter = null;
@@ -75,9 +75,9 @@ if (cluster.isMaster) {
         const serverModule = await import('./server.js');
         const { app, server, PORT, HOST } = serverModule;
 
-        // Import MongoDB modules for cleanup
-        mongoCache = await import('./lib/common/mongo-cache.js');
-        cacheDb = await import('./lib/util/cache-db.js');
+        // Import SQLite modules for cleanup
+        sqliteCache = await import('./lib/util/sqlite-cache.js');
+        sqliteHashCache = await import('./lib/util/sqlite-hash-cache.js');
 
         // Import rate limiters for cleanup
         rdRateLimiter = (await import('./lib/util/rd-rate-limit.js')).default;
@@ -134,17 +134,17 @@ if (cluster.isMaster) {
             console.error(`Worker ${process.pid} Error shutting down rate limiters/proxy/cache: ${error.message}`);
         }
 
-        // Close MongoDB connections
+        // Close SQLite connections
         try {
-            if (mongoCache && cacheDb) {
+            if (sqliteCache && sqliteHashCache) {
                 await Promise.all([
-                    mongoCache.closeMongo(),
-                    cacheDb.closeConnection()
+                    sqliteCache.closeSqlite(),
+                    sqliteHashCache.closeConnection()
                 ]);
-                console.log(`Worker ${process.pid} MongoDB connections closed`);
+                console.log(`Worker ${process.pid} SQLite connections closed`);
             }
         } catch (error) {
-            console.error(`Worker ${process.pid} Error closing MongoDB: ${error.message}`);
+            console.error(`Worker ${process.pid} Error closing SQLite: ${error.message}`);
         }
 
         // Stop memory monitoring
