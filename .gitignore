@@ -106,5 +106,5 @@ dist
 # VS-Code folder
 .vscode
 .aider*
-.data/
+data/
 .lib/data/
