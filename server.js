@@ -15,7 +15,7 @@ import * as sqliteCache from './lib/util/sqlite-cache.js';
 import * as sqliteHashCache from './lib/util/sqlite-hash-cache.js';
 import http from 'http';
 import https from 'https';
-import * as scraperCache from './lib/util/scraper-cache.js';
+
 import Usenet from './lib/usenet.js';
 import { resolveHttpStreamUrl } from './lib/http-streams.js';
 import { resolveUHDMoviesUrl } from './lib/uhdmovies.js';
@@ -608,15 +608,7 @@ function checkAdminAuth(req, res, next) {
     next();
 }
 
-// Endpoint to manually clear in-memory scraper cache
-app.get('/admin/clear-scraper-cache', checkAdminAuth, (req, res) => {
-    const cleared = scraperCache.clear();
-    res.json({
-        success: true,
-        message: `In-memory scraper cache cleared successfully`,
-        entriesCleared: cleared
-    });
-});
+
 
 // Endpoint to clear SQLite search cache (stream results)
 app.get('/admin/clear-search-cache', checkAdminAuth, async (req, res) => {
