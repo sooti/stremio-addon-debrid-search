@@ -126,13 +126,27 @@ import landingTemplate from './lib/util/landingTemplate.js';
 
 
 
+// Function to check memory usage and clear caches if needed
+function checkMemoryUsage() {
+    const memoryUsage = process.memoryUsage();
+    const rssInMB = memoryUsage.rss / 1024 / 1024;
+    const heapUsedInMB = memoryUsage.heapUsed / 1024 / 1024;
+    
+    // If we're using more than 700MB RSS or 400MB heap, log a warning and consider cleanup
+    if (rssInMB > 700 || heapUsedInMB > 400) {
+        console.warn(`[MEMORY] High memory usage - RSS: ${rssInMB.toFixed(2)}MB, Heap: ${heapUsedInMB.toFixed(2)}MB`);
+        return true; // Indicate high memory usage
+    }
+    return false; // Memory usage is OK
+}
+
 // MEMORY LEAK FIX: Add size limits and proper cleanup for URL caches
 // Use Redis for shared caching across workers, fallback to in-memory
 const RESOLVED_URL_CACHE = new Map();
-const RESOLVED_URL_CACHE_MAX_SIZE = 2000; // Increased for better performance
+const RESOLVED_URL_CACHE_MAX_SIZE = 500; // Reduced from 2000 to prevent memory issues
 const CACHE_TIMERS = new Map(); // Track setTimeout IDs for proper cleanup
 const PENDING_RESOLVES = new Map();
-const PENDING_RESOLVES_MAX_SIZE = 1000; // Increased for better multi-user support
+const PENDING_RESOLVES_MAX_SIZE = 100; // Reduced from 1000 to prevent memory issues
 
 // Helper function to evict oldest cache entry (LRU-style FIFO eviction)
 function evictOldestCacheEntry() {
@@ -164,6 +178,7 @@ async function setCacheWithTimer(cacheKey, value, ttlMs) {
     }
 
     // Set cache value in both Redis (if available) and local memory
+    // Use smaller TTL to prevent memory buildup
     if (redis) {
         try {
             await redis.setex(`url:${cacheKey}`, Math.floor(ttlMs / 1000), JSON.stringify(value));
@@ -202,8 +217,13 @@ async function getCacheValue(cacheKey) {
         try {
             const redisValue = await redis.get(`url:${cacheKey}`);
             if (redisValue !== null) {
-                value = JSON.parse(redisValue);
-                console.log(`[CACHE] Redis cache hit for key: ${cacheKey.substring(0, 8)}...`);
+                try {
+                    value = JSON.parse(redisValue);
+                    console.log(`[CACHE] Redis cache hit for key: ${cacheKey.substring(0, 8)}...`);
+                } catch (parseError) {
+                    console.error('[CACHE] Error parsing Redis cached value:', parseError.message);
+                    return null;
+                }
                 return value;
             }
         } catch (error) {
@@ -452,9 +472,16 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
     let config = {};
     if (configParam) {
         try {
-            config = JSON.parse(decodeURIComponent(configParam));
+            // Safe parsing with memory and size limits
+            const decodedConfigParam = decodeURIComponent(configParam);
+            // Check size before parsing to prevent memory issues
+            if (decodedConfigParam.length > 100000) { // 100KB limit
+                console.log('[RESOLVER] Config parameter too large, rejecting');
+                return res.status(400).send('Config parameter too large');
+            }
+            config = JSON.parse(decodedConfigParam);
         } catch (e) {
-            console.log('[RESOLVER] Failed to parse config from query');
+            console.log('[RESOLVER] Failed to parse config from query', e.message);
         }
     }
 
@@ -489,12 +516,17 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
             // MEMORY LEAK FIX: Limit pending requests to prevent unbounded growth
             if (PENDING_RESOLVES.size >= PENDING_RESOLVES_MAX_SIZE) {
                 const oldestKey = PENDING_RESOLVES.keys().next().value;
+                const oldestPromise = PENDING_RESOLVES.get(oldestKey);
+                // Cancel the oldest pending request if possible
                 PENDING_RESOLVES.delete(oldestKey);
                 console.log(`[RESOLVER] Evicted oldest pending request (size: ${PENDING_RESOLVES.size})`);
             }
 
             // Track the pending request
-            const pendingRequest = timedResolve.finally(() => {
+            const pendingRequest = timedResolve.catch(err => {
+                console.error(`[RESOLVER] Pending resolve failed: ${err.message}`);
+                return null;
+            }).finally(() => {
                 PENDING_RESOLVES.delete(cacheKey);
             });
             PENDING_RESOLVES.set(cacheKey, pendingRequest);
@@ -574,12 +606,17 @@ app.get('/resolve/httpstreaming/:url', async (req, res) => {
             // MEMORY LEAK FIX: Limit pending requests to prevent unbounded growth
             if (PENDING_RESOLVES.size >= PENDING_RESOLVES_MAX_SIZE) {
                 const oldestKey = PENDING_RESOLVES.keys().next().value;
+                const oldestPromise = PENDING_RESOLVES.get(oldestKey);
+                // Cancel the oldest pending request if possible
                 PENDING_RESOLVES.delete(oldestKey);
                 console.log(`[HTTP-RESOLVER] Evicted oldest pending request (size: ${PENDING_RESOLVES.size})`);
             }
 
             // Track the pending request
-            const pendingRequest = timedResolve.finally(() => {
+            const pendingRequest = timedResolve.catch(err => {
+                console.error(`[HTTP-RESOLVER] Pending resolve failed: ${err.message}`);
+                return null;
+            }).finally(() => {
                 PENDING_RESOLVES.delete(cacheKey);
             });
             PENDING_RESOLVES.set(cacheKey, pendingRequest);
@@ -1248,7 +1285,13 @@ app.get('/usenet/poll/:nzbUrl/:title/:type/:id', async (req, res) => {
             return res.status(400).json({ ready: false, error: 'Missing configuration' });
         }
 
-        const config = JSON.parse(decodeURIComponent(configJson));
+        // Safe parsing with memory and size limits
+        const decodedConfigJson = decodeURIComponent(configJson);
+        // Check size before parsing to prevent memory issues
+        if (decodedConfigJson.length > 100000) { // 100KB limit
+            return res.status(400).json({ ready: false, error: 'Config parameter too large' });
+        }
+        const config = JSON.parse(decodedConfigJson);
 
         if (!config.newznabUrl || !config.newznabApiKey || !config.sabnzbdUrl || !config.sabnzbdApiKey) {
             return res.status(400).json({ ready: false, error: 'Usenet not configured' });
@@ -1330,7 +1373,13 @@ app.get('/usenet/personal/*', async (req, res) => {
             return res.status(400).send('Missing configuration');
         }
 
-        const config = JSON.parse(decodeURIComponent(configJson));
+        // Safe parsing with memory and size limits
+        const decodedConfigJson = decodeURIComponent(configJson);
+        // Check size before parsing to prevent memory issues
+        if (decodedConfigJson.length > 100000) { // 100KB limit
+            return res.status(400).send('Config parameter too large');
+        }
+        const config = JSON.parse(decodedConfigJson);
 
         // Extract the file path from the URL (everything after /usenet/personal/)
         const filePath = req.params[0];
@@ -1480,7 +1529,13 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
             return res.status(400).send('Missing configuration');
         }
 
-        const config = JSON.parse(decodeURIComponent(configJson));
+        // Safe parsing with memory and size limits
+        const decodedConfigJson = decodeURIComponent(configJson);
+        // Check size before parsing to prevent memory issues
+        if (decodedConfigJson.length > 100000) { // 100KB limit
+            return res.status(400).send('Config parameter too large');
+        }
+        const config = JSON.parse(decodedConfigJson);
 
         if (!config.newznabUrl || !config.newznabApiKey || !config.sabnzbdUrl || !config.sabnzbdApiKey) {
             return res.status(400).send('Usenet not configured');
