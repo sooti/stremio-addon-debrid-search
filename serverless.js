@@ -57,10 +57,11 @@ router.get(`/:configuration?/:resource/:type/:id/:extra?.json`, limiter, (req, r
     const config = parseConfiguration(req.params.configuration)
     const extra = req.params.extra ? qs.parse(req.url.split('/').pop().slice(0, -5)) : {}
     const host = `${req.protocol}://${req.headers.host}`;
-    
-    // Combine all configuration values properly
-    const fullConfig = { ...config, host };
-    
+    const clientIp = requestIp.getClientIp(req);
+
+    // Combine all configuration values properly, including clientIp
+    const fullConfig = { ...config, host, clientIp };
+
     addonInterface.get(resource, type, id, extra, fullConfig)
         .then(async (resp) => {
             if (fullConfig.DebridProvider === 'RealDebrid' && resp && resp.streams) {
