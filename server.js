@@ -259,7 +259,7 @@ app.get('/manifest-no-catalogs.json', (req, res) => {
 });
 
 app.use((req, res, next) => {
-    if (['/', '/configure', '/manifest-no-catalogs.json'].includes(req.path) || req.path.startsWith('/resolve/')) {
+    if (['/', '/configure', '/manifest-no-catalogs.json'].includes(req.path) || req.path.startsWith('/resolve/') || req.path.startsWith('/usenet/') || req.path.startsWith('/admin/')) {
         return next();
     }
     serverless(req, res);
@@ -1639,6 +1639,14 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
             );
             nzoId = submitResult.nzoId;
 
+            // Add to memory cache immediately to prevent race conditions
+            Usenet.activeDownloads.set(nzoId, {
+                nzoId: nzoId,
+                name: decodedTitle,
+                startTime: Date.now(),
+                status: 'downloading'
+            });
+
             // Delete all other downloads to free up bandwidth for this new stream
             console.log('[USENET] Deleting all other downloads to prioritize new stream...');
             const deletedCount = await SABnzbd.deleteAllExcept(
@@ -2741,7 +2749,7 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
 });
 
 app.use((req, res, next) => {
-    if (['/', '/configure', '/manifest-no-catalogs.json'].includes(req.path) || req.path.startsWith('/resolve/')) {
+    if (['/', '/configure', '/manifest-no-catalogs.json'].includes(req.path) || req.path.startsWith('/resolve/') || req.path.startsWith('/usenet/') || req.path.startsWith('/admin/')) {
         return next();
     }
     serverless(req, res, next);
