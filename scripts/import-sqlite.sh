@@ -90,8 +90,11 @@ for db in "${DATABASES[@]}"; do
         fi
         echo -e "  ${GREEN}✓ Database integrity verified${NC}"
 
-        # Backup existing database in container
+        # Backup existing database in container (including WAL/SHM files)
         docker exec "${CONTAINER_NAME}" sh -c "if [ -f /app/data/${db} ]; then mv /app/data/${db} /app/data/${db}.backup.\$(date +%s); fi" 2>/dev/null || true
+
+        # CRITICAL: Remove old WAL and SHM files to prevent corruption
+        docker exec "${CONTAINER_NAME}" sh -c "rm -f /app/data/${db}-wal /app/data/${db}-shm" 2>/dev/null || true
 
         # Copy database to container
         docker cp "${SOURCE_FILE}" "${CONTAINER_NAME}:/app/data/${db}"
