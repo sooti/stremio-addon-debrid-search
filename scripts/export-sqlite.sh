@@ -37,6 +37,16 @@ echo ""
 # List of databases to export
 DATABASES=("cache.db" "hash-cache.db" "performance.db")
 
+echo -e "${YELLOW}Checkpointing WAL files before export...${NC}"
+# Checkpoint all WAL files to ensure data integrity
+for db in "${DATABASES[@]}"; do
+    if docker exec "${CONTAINER_NAME}" test -f "/app/data/${db}" 2>/dev/null; then
+        docker exec "${CONTAINER_NAME}" sh -c "sqlite3 /app/data/${db} 'PRAGMA wal_checkpoint(TRUNCATE);' 2>/dev/null || true"
+    fi
+done
+echo -e "${GREEN}✓ WAL checkpoint complete${NC}"
+echo ""
+
 # Export each database
 for db in "${DATABASES[@]}"; do
     echo -e "${GREEN}Exporting ${db}...${NC}"

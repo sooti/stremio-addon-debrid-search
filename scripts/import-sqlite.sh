@@ -78,6 +78,18 @@ for db in "${DATABASES[@]}"; do
     if [ -n "${SOURCE_FILE}" ] && [ -f "${SOURCE_FILE}" ]; then
         echo -e "${GREEN}Importing ${db}...${NC}"
 
+        # Verify database integrity before importing
+        echo -e "  ${YELLOW}Verifying database integrity...${NC}"
+        INTEGRITY_CHECK=$(sqlite3 "${SOURCE_FILE}" "PRAGMA integrity_check;" 2>&1 || echo "FAILED")
+
+        if [[ "${INTEGRITY_CHECK}" != *"ok"* ]]; then
+            echo -e "  ${RED}✗ Database integrity check failed for ${SOURCE_FILE}${NC}"
+            echo -e "  ${YELLOW}Skipping import of corrupted database${NC}"
+            echo -e "  ${YELLOW}Please use a different backup or run recovery script${NC}"
+            continue
+        fi
+        echo -e "  ${GREEN}✓ Database integrity verified${NC}"
+
         # Backup existing database in container
         docker exec "${CONTAINER_NAME}" sh -c "if [ -f /app/data/${db} ]; then mv /app/data/${db} /app/data/${db}.backup.\$(date +%s); fi" 2>/dev/null || true
 
@@ -87,8 +99,11 @@ for db in "${DATABASES[@]}"; do
         # Set proper permissions
         docker exec "${CONTAINER_NAME}" chown 1000:1000 "/app/data/${db}" 2>/dev/null || true
 
+        # Checkpoint WAL if database uses WAL mode
+        docker exec "${CONTAINER_NAME}" sh -c "sqlite3 /app/data/${db} 'PRAGMA wal_checkpoint(TRUNCATE);' 2>/dev/null || true"
+
         SIZE=$(du -h "${SOURCE_FILE}" | cut -f1)
-        echo -e "  ✓ Imported: ${db} (${SIZE})"
+        echo -e "  ${GREEN}✓ Imported: ${db} (${SIZE})${NC}"
         ((IMPORTED_COUNT++))
     else
         echo -e "  ${YELLOW}⊘ Skipped: ${db} not found in source directory${NC}"
