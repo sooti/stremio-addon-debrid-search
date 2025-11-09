@@ -476,6 +476,13 @@ app.use(rateLimiter);
 // VVVV REVERTED: The resolver now performs a simple redirect VVVV
 app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
     const { debridProvider, debridApiKey, url } = req.params;
+
+    // Validate required parameters
+    if (!url || url === 'undefined') {
+        console.error('[RESOLVER] Missing or invalid URL parameter');
+        return res.status(400).send('Missing or invalid URL parameter');
+    }
+
     const decodedUrl = decodeURIComponent(url);
     const clientIp = requestIp.getClientIp(req);
 

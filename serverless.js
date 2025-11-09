@@ -90,7 +90,15 @@ router.get(`/:configuration?/:resource/:type/:id/:extra?.json`, limiter, (req, r
 
 router.get('/resolve/:debridProvider/:debridApiKey/:id/:hostUrl', limiter, (req, res) => {
     const clientIp = requestIp.getClientIp(req)
-    StreamProvider.resolveUrl(req.params.debridProvider, req.params.debridApiKey, req.params.id, decode(req.params.hostUrl), clientIp)
+    const decodedHostUrl = decode(req.params.hostUrl)
+
+    // Validate hostUrl parameter
+    if (!decodedHostUrl || decodedHostUrl === 'undefined') {
+        console.error('[RESOLVER] Missing or invalid hostUrl parameter')
+        return res.status(400).send('Missing or invalid hostUrl parameter')
+    }
+
+    StreamProvider.resolveUrl(req.params.debridProvider, req.params.debridApiKey, req.params.id, decodedHostUrl, clientIp)
         .then(url => {
             res.redirect(url)
         })
@@ -103,9 +111,16 @@ router.get('/resolve/:debridProvider/:debridApiKey/:id/:hostUrl', limiter, (req,
 // Handle 3-parameter resolve URLs (compatibility with server.js format)
 router.get('/resolve/:debridProvider/:debridApiKey/:url', limiter, (req, res) => {
     const { debridProvider, debridApiKey, url } = req.params;
+
+    // Validate required parameters
+    if (!url || url === 'undefined') {
+        console.error('[RESOLVER] Missing or invalid URL parameter');
+        return res.status(400).send('Missing or invalid URL parameter');
+    }
+
     const decodedUrl = decodeURIComponent(url);
     const clientIp = requestIp.getClientIp(req);
-    
+
     StreamProvider.resolveUrl(debridProvider, debridApiKey, null, decodedUrl, clientIp)
         .then(url => {
             if (url) {
