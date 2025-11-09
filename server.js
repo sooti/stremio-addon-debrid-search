@@ -38,6 +38,8 @@ import https from 'https';
 import Usenet from './lib/usenet.js';
 import { resolveHttpStreamUrl } from './lib/http-streams.js';
 import { resolveUHDMoviesUrl } from './lib/uhdmovies.js';
+import searchCoordinator from './lib/util/search-coordinator.js';
+import * as scraperPerformance from './lib/util/scraper-performance.js';
 
 // Initialize Redis for shared caching across worker processes
 let redis = null;
@@ -426,6 +428,16 @@ for (const sig of ["SIGINT","SIGTERM"]) {
             console.log('[SERVER] All SQLite connections closed');
         } catch (error) {
             console.error(`[SERVER] Error closing SQLite connections: ${error.message}`);
+        }
+
+        // MEMORY LEAK FIX: Shutdown additional modules with cleanup intervals
+        try {
+            searchCoordinator.shutdown();
+            scraperPerformance.shutdown();
+            Usenet.shutdown();
+            console.log('[SERVER] All module cleanup intervals stopped');
+        } catch (error) {
+            console.error(`[SERVER] Error shutting down modules: ${error.message}`);
         }
 
         // Close Redis connections if available
