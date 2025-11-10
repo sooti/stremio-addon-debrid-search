@@ -714,10 +714,67 @@ app.get('/resolve/easynews/:encodedData', async (req, res) => {
         }
 
         if (finalUrl) {
-            // Sanitize URL for logging - hide credentials
+            // Verify stream is ready by checking for 206 Partial Content response
             const sanitizedUrl = finalUrl.replace(/https:\/\/[^:]+:[^@]+@/, 'https://***:***@');
-            console.log(`[EASYNEWS-RESOLVER] Redirecting to: ${sanitizedUrl}`);
-            res.redirect(302, finalUrl);
+            console.log(`[EASYNEWS-RESOLVER] Verifying stream availability: ${sanitizedUrl}`);
+
+            try {
+                // Make a range request to check if stream is ready (returns 206)
+                const streamReady = await new Promise((resolve, reject) => {
+                    const url = new URL(finalUrl);
+                    const options = {
+                        method: 'HEAD',
+                        hostname: url.hostname,
+                        port: url.port || 443,
+                        path: url.pathname,
+                        headers: {
+                            'Authorization': `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`,
+                            'Range': 'bytes=0-0',  // Request first byte to trigger 206 response
+                            'User-Agent': 'Stremio/1.0'
+                        },
+                        timeout: 10000  // 10 second timeout
+                    };
+
+                    const req = https.request(options, (streamRes) => {
+                        console.log(`[EASYNEWS-RESOLVER] Stream status: ${streamRes.statusCode}`);
+                        // Accept 206 (Partial Content), 200 (OK), or 416 (Range Not Satisfiable but file exists)
+                        if (streamRes.statusCode === 206 || streamRes.statusCode === 200 || streamRes.statusCode === 416) {
+                            resolve(true);
+                        } else {
+                            console.error(`[EASYNEWS-RESOLVER] Unexpected status: ${streamRes.statusCode}`);
+                            resolve(false);
+                        }
+                        // Abort the request immediately after getting headers
+                        req.abort();
+                    });
+
+                    req.on('error', (err) => {
+                        console.error(`[EASYNEWS-RESOLVER] Stream verification error: ${err.message}`);
+                        resolve(false);
+                    });
+
+                    req.on('timeout', () => {
+                        console.error(`[EASYNEWS-RESOLVER] Stream verification timeout`);
+                        req.abort();
+                        resolve(false);
+                    });
+
+                    req.end();
+                });
+
+                if (streamReady) {
+                    console.log(`[EASYNEWS-RESOLVER] Stream ready, redirecting to: ${sanitizedUrl}`);
+                    res.redirect(302, finalUrl);
+                } else {
+                    console.error(`[EASYNEWS-RESOLVER] Stream not ready or unavailable`);
+                    res.status(503).send('Stream not ready or unavailable');
+                }
+            } catch (error) {
+                console.error(`[EASYNEWS-RESOLVER] Error verifying stream: ${error.message}`);
+                // Fall back to redirect without verification
+                console.log(`[EASYNEWS-RESOLVER] Falling back to redirect without verification`);
+                res.redirect(302, finalUrl);
+            }
         } else {
             res.status(404).send('Could not resolve Easynews stream link');
         }
