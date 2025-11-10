@@ -696,9 +696,9 @@ app.get('/resolve/easynews/:encodedData', async (req, res) => {
         const cachedValue = await getCacheValue(cacheKey);
         if (cachedValue) {
             finalUrl = cachedValue;
-            console.log(`[EASYNEWS-RESOLVER] Using cached URL for key: ${cacheKeyHash.substring(0, 8)}...`);
+            console.log(`[EASYNEWS-RESOLVER] Cache hit for: ${postTitle}${ext}`);
         } else {
-            console.log(`[EASYNEWS-RESOLVER] Cache miss. Constructing Easynews URL...`);
+            console.log(`[EASYNEWS-RESOLVER] Cache miss. Constructing Easynews URL for: ${postTitle}${ext}`);
 
             // Construct the Easynews download URL
             const baseUrl = downURL || 'https://members.easynews.com';
@@ -711,12 +711,12 @@ app.get('/resolve/easynews/:encodedData', async (req, res) => {
             // Cache TTL for Easynews streams - 24 hours (these URLs are stable)
             const cacheTtlMs = parseInt(process.env.EASYNEWS_RESOLVE_CACHE_TTL_MS || '86400000', 10); // 24 hours default
             await setCacheWithTimer(cacheKey, finalUrl, cacheTtlMs);
-
-            console.log(`[EASYNEWS-RESOLVER] Constructed Easynews URL for: ${postTitle}${ext}`);
         }
 
         if (finalUrl) {
-            console.log("[EASYNEWS-RESOLVER] Redirecting to Easynews stream URL");
+            // Sanitize URL for logging - hide credentials
+            const sanitizedUrl = finalUrl.replace(/https:\/\/[^:]+:[^@]+@/, 'https://***:***@');
+            console.log(`[EASYNEWS-RESOLVER] Redirecting to: ${sanitizedUrl}`);
             res.redirect(302, finalUrl);
         } else {
             res.status(404).send('Could not resolve Easynews stream link');

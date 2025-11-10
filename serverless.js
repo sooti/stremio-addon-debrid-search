@@ -166,7 +166,10 @@ router.get('/resolve/easynews/:encodedData', limiter, (req, res) => {
         // Create URL with embedded credentials
         const finalUrl = `${baseUrl.replace('https://', `https://${encodeURIComponent(username)}:${encodeURIComponent(password)}@`)}/${dlFarm}/${dlPort}/${streamPath}`;
 
-        console.log(`[EASYNEWS-RESOLVER] Constructed Easynews URL for: ${postTitle}${ext}`);
+        // Sanitize URL for logging - hide credentials
+        const sanitizedUrl = finalUrl.replace(/https:\/\/[^:]+:[^@]+@/, 'https://***:***@');
+        console.log(`[EASYNEWS-RESOLVER] Resolving: ${postTitle}${ext}`);
+        console.log(`[EASYNEWS-RESOLVER] Redirecting to: ${sanitizedUrl}`);
         res.redirect(302, finalUrl);
     } catch (error) {
         console.error("[EASYNEWS-RESOLVER] Error occurred:", error.message);
