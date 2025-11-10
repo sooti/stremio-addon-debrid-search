@@ -662,6 +662,71 @@ app.get('/resolve/httpstreaming/:url', async (req, res) => {
     }
 });
 
+// Easynews resolver endpoint
+// This endpoint provides lazy resolution - constructs Easynews URLs only when user selects a stream
+app.get('/resolve/easynews/:encodedData', async (req, res) => {
+    const { encodedData } = req.params;
+
+    // Validate required parameters
+    if (!encodedData || encodedData === 'undefined') {
+        console.error('[EASYNEWS-RESOLVER] Missing or invalid encoded data parameter');
+        return res.status(400).send('Missing or invalid encoded data parameter');
+    }
+
+    try {
+        // Decode the base64 encoded stream data
+        const decodedData = Buffer.from(decodeURIComponent(encodedData), 'base64').toString('utf-8');
+        const streamData = JSON.parse(decodedData);
+
+        // Extract stream information
+        const { username, password, dlFarm, dlPort, postHash, ext, postTitle, downURL } = streamData;
+
+        // Validate required fields
+        if (!username || !password || !dlFarm || !dlPort || !postHash || !ext || !postTitle) {
+            console.error('[EASYNEWS-RESOLVER] Missing required stream data fields');
+            return res.status(400).send('Invalid stream data');
+        }
+
+        // Use hash of stream data as cache key
+        const cacheKeyHash = crypto.createHash('md5').update(encodedData).digest('hex');
+        const cacheKey = `easynews:${cacheKeyHash}`;
+
+        let finalUrl;
+
+        const cachedValue = await getCacheValue(cacheKey);
+        if (cachedValue) {
+            finalUrl = cachedValue;
+            console.log(`[EASYNEWS-RESOLVER] Using cached URL for key: ${cacheKeyHash.substring(0, 8)}...`);
+        } else {
+            console.log(`[EASYNEWS-RESOLVER] Cache miss. Constructing Easynews URL...`);
+
+            // Construct the Easynews download URL
+            const baseUrl = downURL || 'https://members.easynews.com';
+            const streamPath = `${postHash}${ext}/${postTitle}${ext}`;
+
+            // Create URL with embedded credentials
+            finalUrl = `${baseUrl.replace('https://', `https://${encodeURIComponent(username)}:${encodeURIComponent(password)}@`)}/${dlFarm}/${dlPort}/${streamPath}`;
+
+            // Cache the constructed URL
+            // Cache TTL for Easynews streams - 24 hours (these URLs are stable)
+            const cacheTtlMs = parseInt(process.env.EASYNEWS_RESOLVE_CACHE_TTL_MS || '86400000', 10); // 24 hours default
+            await setCacheWithTimer(cacheKey, finalUrl, cacheTtlMs);
+
+            console.log(`[EASYNEWS-RESOLVER] Constructed Easynews URL for: ${postTitle}${ext}`);
+        }
+
+        if (finalUrl) {
+            console.log("[EASYNEWS-RESOLVER] Redirecting to Easynews stream URL");
+            res.redirect(302, finalUrl);
+        } else {
+            res.status(404).send('Could not resolve Easynews stream link');
+        }
+    } catch (error) {
+        console.error("[EASYNEWS-RESOLVER] Error occurred:", error.message);
+        res.status(500).send("Error resolving Easynews stream.");
+    }
+});
+
 // Middleware to check admin token
 function checkAdminAuth(req, res, next) {
     const adminToken = process.env.ADMIN_TOKEN;

@@ -135,6 +135,45 @@ router.get('/resolve/:debridProvider/:debridApiKey/:url', limiter, (req, res) =>
         })
 })
 
+// Easynews resolver endpoint for serverless deployment
+router.get('/resolve/easynews/:encodedData', limiter, (req, res) => {
+    const { encodedData } = req.params;
+
+    // Validate required parameters
+    if (!encodedData || encodedData === 'undefined') {
+        console.error('[EASYNEWS-RESOLVER] Missing or invalid encoded data parameter');
+        return res.status(400).send('Missing or invalid encoded data parameter');
+    }
+
+    try {
+        // Decode the base64 encoded stream data
+        const decodedData = Buffer.from(decodeURIComponent(encodedData), 'base64').toString('utf-8');
+        const streamData = JSON.parse(decodedData);
+
+        // Extract stream information
+        const { username, password, dlFarm, dlPort, postHash, ext, postTitle, downURL } = streamData;
+
+        // Validate required fields
+        if (!username || !password || !dlFarm || !dlPort || !postHash || !ext || !postTitle) {
+            console.error('[EASYNEWS-RESOLVER] Missing required stream data fields');
+            return res.status(400).send('Invalid stream data');
+        }
+
+        // Construct the Easynews download URL
+        const baseUrl = downURL || 'https://members.easynews.com';
+        const streamPath = `${postHash}${ext}/${postTitle}${ext}`;
+
+        // Create URL with embedded credentials
+        const finalUrl = `${baseUrl.replace('https://', `https://${encodeURIComponent(username)}:${encodeURIComponent(password)}@`)}/${dlFarm}/${dlPort}/${streamPath}`;
+
+        console.log(`[EASYNEWS-RESOLVER] Constructed Easynews URL for: ${postTitle}${ext}`);
+        res.redirect(302, finalUrl);
+    } catch (error) {
+        console.error("[EASYNEWS-RESOLVER] Error occurred:", error.message);
+        res.status(500).send("Error resolving Easynews stream.");
+    }
+})
+
 router.get('/ping', (_, res) => {
     res.statusCode = 200
     res.end()
