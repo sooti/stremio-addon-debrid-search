@@ -191,8 +191,10 @@ router.get('/resolve/easynews/:encodedData', limiter, async (req, res) => {
 
                 const req = https.request(options, (streamRes) => {
                     console.log(`[EASYNEWS-RESOLVER] Stream status: ${streamRes.statusCode}`);
-                    // Accept 206 (Partial Content), 200 (OK), or 416 (Range Not Satisfiable but file exists)
-                    if (streamRes.statusCode === 206 || streamRes.statusCode === 200 || streamRes.statusCode === 416) {
+                    // Accept valid status codes:
+                    // 200 (OK), 206 (Partial Content), 302 (Redirect to CDN), 416 (Range Not Satisfiable but file exists)
+                    if (streamRes.statusCode === 200 || streamRes.statusCode === 206 ||
+                        streamRes.statusCode === 302 || streamRes.statusCode === 416) {
                         resolve(true);
                     } else {
                         console.error(`[EASYNEWS-RESOLVER] Unexpected status: ${streamRes.statusCode}`);
