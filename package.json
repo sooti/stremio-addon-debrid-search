@@ -30,7 +30,6 @@
 		"fuse.js": "^7.1.0",
 		"http-proxy-agent": "^7.0.2",
 		"https-proxy-agent": "^7.0.5",
-		"ioredis": "^5.8.1",
 		"loglevel": "^1.9.2",
 		"node-cache": "^5.1.2",
 		"node-fetch": "^3.3.2",

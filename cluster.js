@@ -151,26 +151,7 @@ if (cluster.isMaster) {
         // Stop memory monitoring
         memoryMonitor.stopMonitoring();
 
-        // Close Redis connections if available in the server module
-        try {
-            const serverModule = await import('./server.js');
-            if (serverModule.redis) {
-                await serverModule.redis.quit();
-                console.log(`[REDIS] Worker ${process.pid} Redis client disconnected`);
-            }
-            if (serverModule.redisPublisher) {
-                await serverModule.redisPublisher.quit();
-                console.log(`[REDIS] Worker ${process.pid} Redis publisher disconnected`);
-            }
-            if (serverModule.redisSubscriber) {
-                await serverModule.redisSubscriber.quit();
-                console.log(`[REDIS] Worker ${process.pid} Redis subscriber disconnected`);
-            }
-        } catch (error) {
-            console.error(`[REDIS] Worker ${process.pid} Error closing Redis connections:`, error.message);
-        }
-
-        // Then close HTTP server
+        // Close HTTP server
         if (global.workerServer) {
             global.workerServer.close(() => {
                 console.log(`Worker ${process.pid} server closed`);

@@ -41,71 +41,8 @@ import { resolveUHDMoviesUrl } from './lib/uhdmovies.js';
 import searchCoordinator from './lib/util/search-coordinator.js';
 import * as scraperPerformance from './lib/util/scraper-performance.js';
 
-// Initialize Redis for shared caching across worker processes
-let redis = null;
-let redisPublisher = null;
-let redisSubscriber = null;
-
-// Check if Redis is enabled
-if (process.env.REDIS_URL) {
-  try {
-    const { Redis } = await import('ioredis');
-    
-    // Redis for primary operations
-    redis = new Redis(process.env.REDIS_URL, {
-      maxRetriesPerRequest: 3,
-      retryDelayOnFailover: 100,
-      retryAttempts: 3,
-      connectTimeout: 10000,
-      lazyConnect: true, // Don't connect immediately
-      enableReadyCheck: true,
-      maxScriptsCachingSize: 1000,
-    });
-    
-    // Redis publisher for pub/sub operations
-    redisPublisher = new Redis(process.env.REDIS_URL, {
-      maxRetriesPerRequest: 3,
-      connectTimeout: 5000,
-      lazyConnect: true,
-    });
-    
-    // Redis subscriber for pub/sub operations  
-    redisSubscriber = new Redis(process.env.REDIS_URL, {
-      maxRetriesPerRequest: 3,
-      connectTimeout: 5000,
-      lazyConnect: true,
-    });
-    
-    // Handle connection events
-    redis.on('connect', () => {
-      console.log('[REDIS] Connected to Redis server');
-    });
-    
-    redis.on('error', (err) => {
-      console.error('[REDIS] Connection error:', err.message);
-    });
-    
-    redis.on('reconnecting', () => {
-      console.log('[REDIS] Reconnecting to Redis server...');
-    });
-    
-    // Connect to Redis
-    await Promise.all([
-      redis.connect(),
-      redisPublisher.connect(),
-      redisSubscriber.connect()
-    ]);
-    
-    console.log('[REDIS] Redis connection established for shared caching');
-  } catch (error) {
-    console.warn('[REDIS] Failed to connect to Redis, continuing without shared cache:', error.message);
-    redis = null;
-    redisPublisher = null;
-    redisSubscriber = null;
-  }
-} else {
-  console.log('[REDIS] Redis URL not configured, using local cache only');
-}
+// Using SQLite for local caching
+console.log('[CACHE] Using SQLite for local caching');
 
 // Override console to respect LOG_LEVEL environment variable
 overrideConsole();
@@ -143,7 +80,7 @@ function checkMemoryUsage() {
 }
 
 // MEMORY LEAK FIX: Add size limits and proper cleanup for URL caches
-// Use Redis for shared caching across workers, fallback to in-memory
+// Using in-memory cache with SQLite for persistence
 const RESOLVED_URL_CACHE = new Map();
 const RESOLVED_URL_CACHE_MAX_SIZE = 500; // Reduced from 2000 to prevent memory issues
 const CACHE_TIMERS = new Map(); // Track setTimeout IDs for proper cleanup
@@ -168,7 +105,6 @@ function evictOldestCacheEntry() {
 }
 
 // Helper function to set cache with proper timer tracking
-// Now supports both Redis and in-memory caching
 async function setCacheWithTimer(cacheKey, value, ttlMs) {
     // Evict old entries if needed
     evictOldestCacheEntry();
@@ -179,30 +115,11 @@ async function setCacheWithTimer(cacheKey, value, ttlMs) {
         clearTimeout(existingTimer);
     }
 
-    // Set cache value in both Redis (if available) and local memory
-    // Use smaller TTL to prevent memory buildup
-    if (redis) {
-        try {
-            await redis.setex(`url:${cacheKey}`, Math.floor(ttlMs / 1000), JSON.stringify(value));
-        } catch (error) {
-            console.error('[REDIS] Error setting cached value:', error.message);
-            // Fallback to local cache
-            RESOLVED_URL_CACHE.set(cacheKey, value);
-        }
-    } else {
-        // Use local cache only
-        RESOLVED_URL_CACHE.set(cacheKey, value);
-    }
+    // Set cache value in local memory
+    RESOLVED_URL_CACHE.set(cacheKey, value);
 
     // Set new timer and track it
-    const timerId = setTimeout(async () => {
-        if (redis) {
-            try {
-                await redis.del(`url:${cacheKey}`);
-            } catch (error) {
-                console.error('[REDIS] Error deleting cached value:', error.message);
-            }
-        }
+    const timerId = setTimeout(() => {
         RESOLVED_URL_CACHE.delete(cacheKey);
         CACHE_TIMERS.delete(cacheKey);
     }, ttlMs);
@@ -210,36 +127,14 @@ async function setCacheWithTimer(cacheKey, value, ttlMs) {
     CACHE_TIMERS.set(cacheKey, timerId);
 }
 
-// Helper function to get cached value, checking both Redis and local cache
+// Helper function to get cached value from local cache
 async function getCacheValue(cacheKey) {
-    let value = null;
-    
-    // Try Redis first if available
-    if (redis) {
-        try {
-            const redisValue = await redis.get(`url:${cacheKey}`);
-            if (redisValue !== null) {
-                try {
-                    value = JSON.parse(redisValue);
-                    console.log(`[CACHE] Redis cache hit for key: ${cacheKey.substring(0, 8)}...`);
-                } catch (parseError) {
-                    console.error('[CACHE] Error parsing Redis cached value:', parseError.message);
-                    return null;
-                }
-                return value;
-            }
-        } catch (error) {
-            console.error('[REDIS] Error getting cached value:', error.message);
-        }
-    }
-    
-    // Fallback to local cache
     if (RESOLVED_URL_CACHE.has(cacheKey)) {
-        value = RESOLVED_URL_CACHE.get(cacheKey);
-        console.log(`[CACHE] Local cache hit for key: ${cacheKey.substring(0, 8)}...`);
+        const value = RESOLVED_URL_CACHE.get(cacheKey);
+        console.log(`[CACHE] Cache hit for key: ${cacheKey.substring(0, 8)}...`);
         return value;
     }
-    
+
     return null;
 }
 
@@ -440,25 +335,7 @@ for (const sig of ["SIGINT","SIGTERM"]) {
             console.error(`[SERVER] Error shutting down modules: ${error.message}`);
         }
 
-        // Close Redis connections if available
-        try {
-            if (redis) {
-                await redis.quit();
-                console.log('[REDIS] Redis client disconnected');
-            }
-            if (redisPublisher) {
-                await redisPublisher.quit();
-                console.log('[REDIS] Redis publisher disconnected');
-            }
-            if (redisSubscriber) {
-                await redisSubscriber.quit();
-                console.log('[REDIS] Redis subscriber disconnected');
-            }
-        } catch (error) {
-            console.error('[REDIS] Error closing Redis connections:', error.message);
-        }
-
-        // Then close HTTP server
+        // Close HTTP server
         server.close(() => {
             console.log('[SERVER] HTTP server closed');
             process.exit(0);

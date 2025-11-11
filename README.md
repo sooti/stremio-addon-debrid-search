@@ -464,7 +464,7 @@ DEBRID_PROXY_SERVICES=*:true
 ### Recommended Settings
 - **Single user**: 4-6 workers, SQLite optional
 - **Multi-user (5-10)**: 10-16 workers, SQLite recommended
-- **High load (50+)**: 24-32 workers, SQLite + Redis recommended
+- **High load (50+)**: 24-32 workers, SQLite required
 
 ---
 
