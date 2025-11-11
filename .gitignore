@@ -108,3 +108,5 @@ dist
 .aider*
 data/
 .lib/data/
+*.backup
+*.broken
