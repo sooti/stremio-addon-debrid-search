@@ -1,22 +1,16 @@
 version: "3.9"
 
 services:
-  # FastAPI-based file server (production-ready, fixed config)
+  # FastAPI-based file server with on-demand archive extraction (RAR/7z/ZIP)
   usenet-server:
     build:
       context: .
       dockerfile: Dockerfile.fastapi
     image: usenet-file-server:fastapi
     container_name: usenet-file-server
-    privileged: true
-    cap_add:
-      - SYS_ADMIN
-    devices:
-      - /dev/fuse:/dev/fuse
-    security_opt:
-      - apparmor:unconfined
+    # No privileged mode needed - pure Python extraction!
     volumes:
-      - /path/to/your/downloads:/downloads:rw  # Change this to your download directory
+      - /home/sooti/Videos:/downloads:rw  # SABnzbd download directory
     ports:
       - "3003:3003"
     environment:
