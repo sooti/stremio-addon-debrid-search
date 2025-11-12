@@ -233,6 +233,8 @@ async function redirectToErrorVideo(errorText, res, fileServerUrl) {
 
 // Store Usenet configs globally (so auto-clean works even without active streams)
 const USENET_CONFIGS = new Map(); // fileServerUrl -> config
+// Track pending Usenet submissions to prevent race conditions
+const PENDING_USENET_SUBMISSIONS = new Map(); // title -> Promise
 
 // Cleanup interval for inactive streams (check every 2 minutes)
 const STREAM_CLEANUP_INTERVAL = 2 * 60 * 1000;
@@ -1546,24 +1548,51 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
 
         // Submit NZB to SABnzbd if not already downloading and file not on server
         if (!nzoId) {
-            console.log('[USENET] Submitting NZB to SABnzbd...');
-            const submitResult = await Usenet.submitNzb(
-                config.sabnzbdUrl,
-                config.sabnzbdApiKey,
-                config.newznabUrl,
-                config.newznabApiKey,
-                decodedNzbUrl,
-                decodedTitle
-            );
-            nzoId = submitResult.nzoId;
+            // Check for pending submission to prevent race conditions
+            if (PENDING_USENET_SUBMISSIONS.has(decodedTitle)) {
+                console.log('[USENET] Another request is already submitting this NZB, waiting...');
+                try {
+                    const pendingResult = await PENDING_USENET_SUBMISSIONS.get(decodedTitle);
+                    nzoId = pendingResult.nzoId;
+                    console.log('[USENET] Using NZO ID from concurrent submission:', nzoId);
+                } catch (error) {
+                    console.log('[USENET] Pending submission failed, will try again:', error.message);
+                    // Continue to submit below if the other request failed
+                }
+            }
 
-            // Add to memory cache immediately to prevent race conditions
-            Usenet.activeDownloads.set(nzoId, {
-                nzoId: nzoId,
-                name: decodedTitle,
-                startTime: Date.now(),
-                status: 'downloading'
-            });
+            if (!nzoId) {
+                console.log('[USENET] Submitting NZB to SABnzbd...');
+
+                // Create submission promise and store it
+                const submissionPromise = Usenet.submitNzb(
+                    config.sabnzbdUrl,
+                    config.sabnzbdApiKey,
+                    config.newznabUrl,
+                    config.newznabApiKey,
+                    decodedNzbUrl,
+                    decodedTitle
+                );
+                PENDING_USENET_SUBMISSIONS.set(decodedTitle, submissionPromise);
+
+                try {
+                    const submitResult = await submissionPromise;
+                    nzoId = submitResult.nzoId;
+                } finally {
+                    // Clean up pending submission after 5 seconds
+                    setTimeout(() => {
+                        PENDING_USENET_SUBMISSIONS.delete(decodedTitle);
+                    }, 5000);
+                }
+
+                // Add to memory cache immediately to prevent race conditions
+                Usenet.activeDownloads.set(nzoId, {
+                    nzoId: nzoId,
+                    name: decodedTitle,
+                    startTime: Date.now(),
+                    status: 'downloading'
+                });
+            }
 
             // Delete all other downloads to free up bandwidth for this new stream
             console.log('[USENET] Deleting all other downloads to prioritize new stream...');

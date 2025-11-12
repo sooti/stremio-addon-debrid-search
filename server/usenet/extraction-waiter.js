@@ -112,12 +112,36 @@ export async function waitForFileExtraction(params) {
         // If complete, get from complete folder
         if (status.status === 'completed' && status.path) {
             console.log('[USENET] Download completed, looking in complete folder:', status.path);
+            console.log('[USENET] Checking if path exists:', fs.existsSync(status.path) ? 'YES' : 'NO');
 
-            const hasRarFiles = fs.existsSync(status.path) &&
-                fs.readdirSync(status.path).some(f => f.toLowerCase().match(/\.(rar|r\d+)$/));
+            if (!fs.existsSync(status.path)) {
+                console.log('[USENET] ⚠️  Complete folder not found! Trying file server...');
+                if (fileServerUrl) {
+                    const fileInfo = await findVideoFileViaAPI(
+                        fileServerUrl,
+                        decodedTitle,
+                        type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+                        config.fileServerPassword
+                    );
+                    if (fileInfo) {
+                        videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${fileInfo.path}`;
+                        videoFileSize = fileInfo.size;
+                        console.log('[USENET] Found video file via API (path not found locally):', videoFilePath);
+                        break;
+                    }
+                }
+                console.log('[USENET] Complete folder missing and file server check failed');
+                continue; // Keep waiting
+            }
 
-            if (hasRarFiles && fileServerUrl) {
-                console.log('[USENET] Completed RAR archive detected, using file server API with rar2fs');
+            const filesInDir = fs.readdirSync(status.path);
+            console.log(`[USENET] Files in complete folder (${filesInDir.length}):`, filesInDir.slice(0, 10).join(', '));
+
+            const hasRarFiles = filesInDir.some(f => f.toLowerCase().match(/\.(rar|r\d+)$/));
+            const has7zFiles = filesInDir.some(f => f.toLowerCase().match(/\.7z|\.zip/));
+
+            if ((hasRarFiles || has7zFiles) && fileServerUrl) {
+                console.log(`[USENET] Completed archive detected (RAR: ${hasRarFiles}, 7z/ZIP: ${has7zFiles}), using file server API`);
                 const fileInfo = await findVideoFileViaAPI(
                     fileServerUrl,
                     decodedTitle,
@@ -130,9 +154,12 @@ export async function waitForFileExtraction(params) {
                     videoFileSize = fileInfo.size;
                     console.log('[USENET] Found video file via API (completed):', videoFilePath);
                     break;
+                } else {
+                    console.log('[USENET] File server API did not return a video file');
                 }
             } else {
                 // Direct video file (no RAR)
+                console.log('[USENET] No archive files, looking for direct video file');
                 videoFilePath = await findVideoFile(
                     status.path,
                     decodedTitle,
@@ -141,6 +168,8 @@ export async function waitForFileExtraction(params) {
                 if (videoFilePath) {
                     console.log('[USENET] Found direct video file (completed):', videoFilePath);
                     break;
+                } else {
+                    console.log('[USENET] No video file found in complete folder');
                 }
             }
         }
@@ -154,6 +183,7 @@ export async function waitForFileExtraction(params) {
         if (status.status === 'error' || status.status === 'failed') {
             const errorMsg = `Download failed: ${status.error || status.failMessage || 'Unknown error'}`;
             console.log(`[USENET] ${errorMsg}`);
+            console.log(`[USENET] Full status object:`, JSON.stringify(status, null, 2));
             throw new Error(errorMsg);
         }
 
