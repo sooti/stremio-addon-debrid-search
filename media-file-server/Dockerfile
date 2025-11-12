@@ -8,17 +8,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     python3 python3-pip \
     fuse libfuse-dev \
     libarchive-dev pkg-config \
-    build-essential automake autoconf libtool git \
+    build-essential g++ automake autoconf libtool git \
     unrar libunrar-dev \
     ffmpeg \
     wget ca-certificates
 
 # Build UnRAR library from source (keep source for rar2fs headers)
+# Note: UnRAR doesn't support parallel builds well, so we build without -j
 RUN cd /tmp && \
     wget -q https://www.rarlab.com/rar/unrarsrc-6.2.12.tar.gz && \
     tar xzf unrarsrc-6.2.12.tar.gz && \
     cd unrar && \
-    make -j$(nproc) lib && \
+    make lib && \
     make install-lib
 
 # Build rar2fs from source (point to unrar source directory)
