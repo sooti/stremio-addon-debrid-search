@@ -375,19 +375,19 @@ pip install hypercorn
 hypercorn fastapi_file_server:app --bind 0.0.0.0:3003 --workers 4
 ```
 
-### rar2fs Options
+### Archive Mounting with fuse-archive
 
-The server automatically mounts the source directory via rar2fs at `/mnt/rarfs`.
+The server automatically mounts archives using fuse-archive at `/mnt/archivefs`.
 
 **Benefits:**
 - Transparent archive streaming (no extraction required)
-- Supports RAR, 7z, ZIP, and other archive formats
-- Saves disk space
+- Universal support: RAR, 7z, ZIP, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, ISO, CPIO
+- Saves disk space and streaming startup time
 - Instant access to archive contents
+- Single tool for all archive formats
 
-**Limitations:**
-- Requires `fuse-archive` or `archivemount` for full format support
-- Requires `--privileged` Docker flag or FUSE permissions
+**Requirements:**
+- Requires `--privileged` Docker flag or FUSE device access (`--device /dev/fuse --cap-add SYS_ADMIN`)
 
 ---
 
@@ -507,27 +507,32 @@ time ls -lh /mnt/rarfs/Release/
 # Configure SABnzbd to not use RAR compression
 ```
 
-### 7z Archive Support
+### Universal Archive Support
 
-**Status:** ✅ 7z archives are now fully supported via FUSE mounting!
+**Status:** ✅ All archive formats fully supported via fuse-archive!
 
 **What's included in Docker:**
-- `fuse-archive` - Google's universal archive mounting tool (RAR, 7z, ZIP, TAR, ISO, etc.)
-- `rar2fs` - RAR-specific mounting tool for backward compatibility
-- Both tools are **built from source and pre-installed** - zero manual setup!
+- `fuse-archive` - Google's universal archive mounting tool
+- **Built from source and pre-installed** - zero manual setup!
 
 **How it works:**
-- File server automatically detects archive types (RAR, 7z, ZIP, etc.)
-- Mounts them transparently using FUSE at `/mnt/archivefs`
+- File server automatically mounts archives using fuse-archive
+- Transparently serves files from `/mnt/archivefs`
 - Streams video directly from mounted archives
-- No extraction needed - saves disk space and streaming startup time
+- No extraction needed - saves disk space and time
 
 **Docker requirements:**
 - Must run with `--privileged` flag OR
 - Use `--device /dev/fuse --cap-add SYS_ADMIN` for FUSE access
 
 **Supported formats:**
-- RAR, 7z, ZIP, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, ISO, CPIO and more
+- **RAR** - All RAR versions including multi-part archives
+- **7z** - 7-Zip compressed archives
+- **ZIP** - Standard ZIP archives
+- **TAR** - Including .tar.gz, .tar.bz2, .tar.xz
+- **ISO** - CD/DVD image files
+- **CPIO** - Unix archive format
+- And more via libarchive support
 
 ---
 
