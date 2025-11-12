@@ -3,7 +3,7 @@
 FastAPI-based file server for Usenet streaming with production features
 - Async I/O for concurrent streams
 - Automatic range request support
-- rar2fs transparent RAR extraction
+- On-demand archive extraction (RAR/7z/ZIP)
 - API key authentication
 - Structured logging
 - Health checks
@@ -20,6 +20,8 @@ import shutil
 import glob
 import hashlib
 import logging
+import zipfile
+import io
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -30,6 +32,23 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 import aiofiles
 import uvicorn
+
+# Archive handling libraries
+try:
+    import rarfile
+    RARFILE_AVAILABLE = True
+    # Configure rarfile to use unrar-free
+    rarfile.UNRAR_TOOL = "unrar-free"
+except ImportError:
+    RARFILE_AVAILABLE = False
+    print("[WARNING] rarfile not available - RAR support disabled")
+
+try:
+    import py7zr
+    PY7ZR_AVAILABLE = True
+except ImportError:
+    PY7ZR_AVAILABLE = False
+    print("[WARNING] py7zr not available - 7z support disabled")
 
 # Configure logging
 logging.basicConfig(
@@ -79,6 +98,110 @@ class Config:
     VIDEO_EXTENSIONS = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.3gp', '.ogv', '.ts', '.m2ts']
 
 config = Config()
+
+
+# === Archive Handling Functions ===
+
+def is_archive(filepath: str) -> bool:
+    """Check if a file is a supported archive (RAR/7z/ZIP)"""
+    if not os.path.isfile(filepath):
+        return False
+    lower = filepath.lower()
+    if lower.endswith('.zip'):
+        return True
+    if RARFILE_AVAILABLE and (lower.endswith('.rar') or re.match(r'.*\.r\d+$', lower) or re.match(r'.*\.part\d+\.rar$', lower)):
+        return True
+    if PY7ZR_AVAILABLE and (lower.endswith('.7z') or re.match(r'.*\.7z\.\d+$', lower)):
+        return True
+    return False
+
+
+def list_archive_contents(archive_path: str) -> List[Dict[str, Any]]:
+    """List all files in an archive with their sizes"""
+    lower = archive_path.lower()
+    results = []
+
+    try:
+        if lower.endswith('.zip'):
+            with zipfile.ZipFile(archive_path, 'r') as zf:
+                for info in zf.infolist():
+                    results.append({
+                        'name': info.filename,
+                        'size': info.file_size,
+                        'is_dir': info.is_dir()
+                    })
+
+        elif RARFILE_AVAILABLE and (lower.endswith('.rar') or re.match(r'.*\.r\d+$', lower) or re.match(r'.*\.part\d+\.rar$', lower)):
+            with rarfile.RarFile(archive_path, 'r') as rf:
+                for info in rf.infolist():
+                    results.append({
+                        'name': info.filename,
+                        'size': info.file_size,
+                        'is_dir': info.isdir()
+                    })
+
+        elif PY7ZR_AVAILABLE and (lower.endswith('.7z') or re.match(r'.*\.7z\.\d+$', lower)):
+            with py7zr.SevenZipFile(archive_path, 'r') as szf:
+                for name, info in szf.list():
+                    results.append({
+                        'name': name,
+                        'size': info.uncompressed if hasattr(info, 'uncompressed') else 0,
+                        'is_dir': info.is_directory if hasattr(info, 'is_directory') else False
+                    })
+
+    except Exception as e:
+        logger.error(f"Error listing archive {archive_path}: {e}")
+
+    return results
+
+
+def extract_file_from_archive(archive_path: str, file_in_archive: str, start_byte: int = 0, end_byte: Optional[int] = None) -> bytes:
+    """Extract a specific file from an archive, optionally with byte range"""
+    lower = archive_path.lower()
+
+    try:
+        # Extract full file first
+        data = None
+
+        if lower.endswith('.zip'):
+            with zipfile.ZipFile(archive_path, 'r') as zf:
+                data = zf.read(file_in_archive)
+
+        elif RARFILE_AVAILABLE and (lower.endswith('.rar') or re.match(r'.*\.r\d+$', lower) or re.match(r'.*\.part\d+\.rar$', lower)):
+            with rarfile.RarFile(archive_path, 'r') as rf:
+                data = rf.read(file_in_archive)
+
+        elif PY7ZR_AVAILABLE and (lower.endswith('.7z') or re.match(r'.*\.7z\.\d+$', lower)):
+            with py7zr.SevenZipFile(archive_path, 'r') as szf:
+                extracted = szf.read([file_in_archive])
+                if file_in_archive in extracted:
+                    data = extracted[file_in_archive].read()
+
+        if data is None:
+            raise Exception(f"Failed to extract {file_in_archive} from {archive_path}")
+
+        # Apply byte range if requested
+        if end_byte is None:
+            end_byte = len(data)
+
+        return data[start_byte:end_byte]
+
+    except Exception as e:
+        logger.error(f"Error extracting {file_in_archive} from {archive_path}: {e}")
+        raise
+
+
+def find_archives_in_directory(directory: str) -> List[str]:
+    """Find all archive files in a directory (non-recursive)"""
+    archives = []
+    try:
+        for filename in os.listdir(directory):
+            full_path = os.path.join(directory, filename)
+            if is_archive(full_path):
+                archives.append(filename)
+    except Exception as e:
+        logger.error(f"Error scanning directory {directory}: {e}")
+    return archives
 
 
 # === Authentication ===
@@ -352,12 +475,66 @@ async def list_files(
                 except Exception as e:
                     logger.error(f"Error stating file {full_path}: {e}")
 
+    # Now scan for archive files and list their video contents
+    logger.info("Scanning for archive files (RAR, 7z, ZIP)")
+    archives_found = 0
+    videos_in_archives = 0
+
+    for root, dirs, files_list in os.walk(root_dir):
+        for archive_file in find_archives_in_directory(root):
+            archives_found += 1
+            archive_path = os.path.join(root, archive_file)
+            rel_archive_path = os.path.relpath(archive_path, root_dir)
+
+            try:
+                # List contents of archive
+                archive_contents = list_archive_contents(archive_path)
+
+                # Filter for video files
+                for item in archive_contents:
+                    if item['is_dir']:
+                        continue
+
+                    ext = os.path.splitext(item['name'])[1].lower()
+                    if ext in config.VIDEO_EXTENSIONS:
+                        filename = os.path.basename(item['name'])
+
+                        # Skip if we already have this filename (avoid duplicates)
+                        if filename in seen_files:
+                            continue
+
+                        # Mark as complete if NOT in incomplete directory
+                        is_complete = 'incomplete' not in rel_archive_path.lower()
+
+                        # Extract folder name (archive's parent directory)
+                        folder_name = os.path.basename(os.path.dirname(archive_path))
+
+                        # Special path format: archive://rel/path/to/archive.rar|video.mkv
+                        archive_internal_path = f"archive://{rel_archive_path}|{item['name']}"
+
+                        files.append({
+                            'name': filename,
+                            'path': archive_internal_path.replace('\\', '/'),
+                            'flatPath': filename,
+                            'folderName': folder_name,
+                            'size': item['size'],
+                            'modified': os.path.getmtime(archive_path),
+                            'isComplete': is_complete,
+                            'inArchive': True  # Flag to indicate this is from an archive
+                        })
+                        seen_files.add(filename)
+                        videos_in_archives += 1
+            except Exception as e:
+                logger.error(f"Error reading archive {archive_path}: {e}")
+
+    logger.info(f"Found {archives_found} archives containing {videos_in_archives} video files")
+
     # Sort by completion status and modification time
     files.sort(key=lambda x: (not x['isComplete'], -x['modified']))
 
     completed_count = sum(1 for f in files if f['isComplete'])
     incomplete_count = len(files) - completed_count
-    logger.info(f"Found {len(files)} files ({completed_count} completed, {incomplete_count} in progress)")
+    logger.info(f"Found {len(files)} total files ({completed_count} completed, {incomplete_count} in progress)")
 
     return JSONResponse(content={'files': files})
 
@@ -456,6 +633,109 @@ async def delete_file(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def stream_from_archive(file_path: str, range_header: Optional[str] = None):
+    """Handle on-demand extraction from archives with range support"""
+    try:
+        # Parse path: archive://rel/path/to/archive.rar|video.mkv
+        path_without_prefix = file_path[len('archive://'):]
+
+        # Split on the pipe character
+        if '|' not in path_without_prefix:
+            logger.error(f"Invalid archive path format: {file_path}")
+            raise HTTPException(status_code=400, detail="Invalid archive path format")
+
+        archive_rel_path, internal_file = path_without_prefix.split('|', 1)
+
+        # Resolve archive path
+        root_dir = config.RAR2FS_MOUNT or config.SOURCE_DIR
+        archive_path = os.path.join(root_dir, archive_rel_path)
+
+        if not os.path.exists(archive_path):
+            logger.error(f"Archive not found: {archive_path}")
+            raise HTTPException(status_code=404, detail=f"Archive not found: {archive_rel_path}")
+
+        logger.info(f"Extracting from archive: {archive_path}")
+        logger.info(f"Internal file: {internal_file}")
+
+        # Get file info from archive
+        try:
+            archive_contents = list_archive_contents(archive_path)
+            file_info = None
+            for item in archive_contents:
+                if item['name'] == internal_file:
+                    file_info = item
+                    break
+
+            if not file_info:
+                logger.error(f"File not found in archive: {internal_file}")
+                raise HTTPException(status_code=404, detail=f"File not found in archive: {internal_file}")
+
+            file_size = file_info['size']
+            logger.info(f"File size: {file_size} bytes ({file_size / 1024 / 1024:.2f} MB)")
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error reading archive contents: {e}")
+            raise HTTPException(status_code=500, detail=f"Error reading archive: {str(e)}")
+
+        # Parse range header
+        start = 0
+        end = file_size - 1
+
+        if range_header:
+            logger.info(f"Range request: {range_header}")
+            match = re.search(r'bytes=(\d+)-(\d*)', range_header)
+            if match:
+                start = int(match.group(1))
+                end = int(match.group(2)) if match.group(2) else file_size - 1
+                seek_percent = (start / file_size * 100) if file_size > 0 else 0
+                logger.info(f"Range: {start}-{end} ({seek_percent:.1f}% of file)")
+
+        # Validate range
+        if start >= file_size:
+            logger.error(f"Range not satisfiable: start={start} >= file_size={file_size}")
+            raise HTTPException(status_code=416, detail="Range Not Satisfiable")
+
+        if end >= file_size:
+            end = file_size - 1
+
+        content_length = end - start + 1
+
+        # Extract the file (or range) from archive
+        logger.info(f"Extracting bytes {start}-{end} ({content_length} bytes, {content_length/1024/1024:.2f} MB)")
+
+        try:
+            # Extract with range support
+            data = extract_file_from_archive(archive_path, internal_file, start, end + 1)
+
+            if not data:
+                logger.error("Extraction returned no data")
+                raise HTTPException(status_code=500, detail="Failed to extract file from archive")
+
+            # Create response
+            headers = {
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(len(data)),
+                "Content-Type": "application/octet-stream"
+            }
+
+            logger.info(f"✓ Sending {len(data)} bytes from archive")
+
+            return Response(content=data, status_code=206, headers=headers, media_type="application/octet-stream")
+
+        except Exception as e:
+            logger.error(f"Error extracting file: {e}")
+            raise HTTPException(status_code=500, detail=f"Error extracting file: {str(e)}")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Exception in stream_from_archive: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @app.get("/{file_path:path}")
 async def stream_file(
     file_path: str,
@@ -463,7 +743,12 @@ async def stream_file(
     range: Optional[str] = Header(None),
     authenticated: bool = Depends(verify_api_key)
 ):
-    """Stream a file with automatic range request support"""
+    """Stream a file with automatic range request support (including archive extraction)"""
+
+    # Check for archive:// paths (on-demand extraction)
+    if file_path.startswith('archive://'):
+        return await stream_from_archive(file_path, range)
+
     root_dir = config.RAR2FS_MOUNT or config.SOURCE_DIR
     full_path = os.path.join(root_dir, file_path)
 
