@@ -1630,61 +1630,6 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
             console.log(`[USENET] Using folder name from status: ${actualFolderName}`);
         }
 
-        // Check for 7z archives ONCE before the wait loop (if using file server)
-        let checked7z = false;
-        if (fileServerUrl) {
-            try {
-                const axios = (await import('axios')).default;
-                const headers = {};
-                const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
-                if (apiKey) {
-                    headers['X-API-Key'] = apiKey;
-                }
-
-                const checkUrl = `${fileServerUrl.replace(/\/$/, '')}/api/check-archives?folder=${encodeURIComponent(actualFolderName)}`;
-                console.log(`[USENET] Checking for 7z archives: ${checkUrl}`);
-
-                const checkResult = await axios.get(checkUrl, {
-                    timeout: 5000,
-                    headers: headers,
-                    validateStatus: (status) => status === 200 || status === 404 || status === 400
-                });
-
-                checked7z = true;
-
-                console.log(`[USENET] Archive check result:`, JSON.stringify(checkResult.data));
-
-                if (checkResult.status === 200 && checkResult.data?.has7z) {
-                    console.log(`[USENET] ❌ 7z archive detected - NOT SUPPORTED`);
-                    console.log(`[USENET] Deleting download: ${nzoId}`);
-
-                    // Delete the download
-                    await SABnzbd.deleteItem(
-                        config.sabnzbdUrl,
-                        config.sabnzbdApiKey,
-                        nzoId,
-                        true // Delete files
-                    );
-
-                    // Redirect to error video on Python server
-                    return redirectToErrorVideo(
-                        '7z archives are not supported. Only RAR archives and direct video files are supported. Download has been removed.',
-                        res,
-                        fileServerUrl
-                    );
-                } else if (checkResult.status === 200 && checkResult.data?.found === false) {
-                    console.log(`[USENET] Folder not found yet, will check again in loop if needed`);
-                    checked7z = false; // Allow retry since folder doesn't exist yet
-                }
-            } catch (e) {
-                console.log(`[USENET] Could not check for 7z archives: ${e.message}`);
-                if (e.response) {
-                    console.log(`[USENET] Response status: ${e.response.status}, data:`, e.response.data);
-                }
-                checked7z = true; // Don't retry on error
-            }
-        }
-
         // Wait for video file to be extracted - poll more frequently for faster streaming
         const maxWaitForFile = 120000; // 2 minutes max
         const fileCheckInterval = 1000; // Check every 1 second (faster detection)
@@ -1708,54 +1653,7 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
 
                 if (fileServerUrl) {
                     // Query the file server API directly (don't check local filesystem)
-                    // The file server has its own filesystem access and rar2fs mounting
-
-                    // Check for 7z if we haven't checked yet (folder wasn't created on first check)
-                    if (!checked7z) {
-                        try {
-                            const axios = (await import('axios')).default;
-                            const headers = {};
-                            const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
-                            if (apiKey) {
-                                headers['X-API-Key'] = apiKey;
-                            }
-
-                            const checkUrl = `${fileServerUrl.replace(/\/$/, '')}/api/check-archives?folder=${encodeURIComponent(actualFolderName)}`;
-                            const checkResult = await axios.get(checkUrl, {
-                                timeout: 5000,
-                                headers: headers,
-                                validateStatus: (status) => status === 200 || status === 404 || status === 400
-                            });
-
-                            if (checkResult.status === 200 && checkResult.data?.found) {
-                                checked7z = true; // Found the folder, don't check again
-                                console.log(`[USENET] Archive check result:`, JSON.stringify(checkResult.data));
-
-                                if (checkResult.data.has7z) {
-                                    console.log(`[USENET] ❌ 7z archive detected - NOT SUPPORTED`);
-                                    console.log(`[USENET] Deleting download: ${nzoId}`);
-
-                                    // Delete the download
-                                    await SABnzbd.deleteItem(
-                                        config.sabnzbdUrl,
-                                        config.sabnzbdApiKey,
-                                        nzoId,
-                                        true // Delete files
-                                    );
-
-                                    // Redirect to error video on Python server
-                                    return redirectToErrorVideo(
-                                        '7z archives are not supported. Only RAR archives and direct video files are supported. Download has been removed.',
-                                        res,
-                                        fileServerUrl
-                                    );
-                                }
-                            }
-                        } catch (e) {
-                            console.log(`[USENET] Could not check for 7z archives in loop: ${e.message}`);
-                            checked7z = true; // Don't retry on error
-                        }
-                    }
+                    // The file server has its own filesystem access and FUSE archive mounting
 
                     const fileInfo = await findVideoFileViaAPI(
                         fileServerUrl,
@@ -1806,7 +1704,7 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                 }
 
                 if (!videoFilePath && !fileServerUrl && searchPath && fs.existsSync(searchPath)) {
-                    // Only check for 7z if we're not using file server
+                    // Check for archives if we're not using file server
                     let files = [];
                     try {
                         files = fs.readdirSync(searchPath);
@@ -1814,23 +1712,23 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                         console.log(`[USENET] Could not list directory: ${e.message}`);
                     }
 
-                    // Check for 7z files - NOT SUPPORTED
+                    // Check for archive files (RAR, 7z, ZIP)
                     const has7zFiles = files.some(f => {
                         const lower = f.toLowerCase();
                         return lower.endsWith('.7z') || lower.match(/\.7z\.\d+$/);
                     });
                     if (has7zFiles) {
-                        console.log('[USENET] ⚠️ 7z archive detected - not supported (only RAR and direct video files)');
+                        console.log('[USENET] ⚠️ 7z archive detected - ensure fuse-archive is installed on file server');
                     }
 
-                    // Check if we see RAR files (rar2fs will mount them transparently)
+                    // Check if we see RAR files (FUSE will mount them transparently)
                     const hasRarFiles = files.some(f =>
                         f.toLowerCase().endsWith('.rar') ||
                         f.toLowerCase().match(/\.r\d+$/) ||
                         f.toLowerCase().endsWith('.zip')
                     );
                     if (hasRarFiles) {
-                        console.log('[USENET] ⚠️ RAR/ZIP archives detected - waiting for rar2fs to mount them');
+                        console.log('[USENET] ⚠️ RAR/ZIP archives detected - waiting for FUSE to mount them');
                     } else {
                         console.log('[USENET] No video file found yet, download may still be in progress');
                     }
@@ -1916,51 +1814,9 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
             console.log('[USENET] Status:', status.status, 'Progress:', status.percentComplete + '%');
             console.log('[USENET] Searched path:', searchPath);
 
-            // Check if we found 7z files - NOT supported
-            if (searchPath && fs.existsSync(searchPath)) {
-                try {
-                    const files = fs.readdirSync(searchPath);
-
-                    // Check for 7z files - NOT SUPPORTED
-                    const has7zFiles = files.some(f => {
-                        const lower = f.toLowerCase();
-                        return lower.endsWith('.7z') || lower.match(/\.7z\.\d+$/);
-                    });
-                    if (has7zFiles) {
-                        console.log('[USENET] ❌ 7z archive detected - NOT SUPPORTED');
-                        console.log('[USENET] Found 7z files:', files.filter(f => {
-                            const lower = f.toLowerCase();
-                            return lower.endsWith('.7z') || lower.match(/\.7z\.\d+$/);
-                        }).slice(0, 3).join(', '));
-                        console.log(`[USENET] Deleting download: ${nzoId}`);
-
-                        // Delete the download
-                        await SABnzbd.deleteItem(
-                            config.sabnzbdUrl,
-                            config.sabnzbdApiKey,
-                            nzoId,
-                            true // Delete files
-                        );
-
-                        // Redirect to error video on Python server
-                        const fileServerUrl = config.fileServerUrl || process.env.USENET_FILE_SERVER_URL;
-                        if (!fileServerUrl) {
-                            return res.status(400).send('7z archives are not supported. Only RAR archives and direct video files are supported. Download has been removed.');
-                        }
-                        return redirectToErrorVideo(
-                            '7z archives are not supported. Only RAR archives and direct video files are supported. Download has been removed.',
-                            res,
-                            fileServerUrl
-                        );
-                    }
-                } catch (e) {
-                    // Ignore errors
-                }
-            }
-
             return res.status(202).send(
                 `Download in progress: ${status.percentComplete?.toFixed(1) || 0}%. ` +
-                `Video file not yet available via rar2fs. Please try again in a moment.`
+                `Video file not yet available from archive. Please try again in a moment.`
             );
         }
 

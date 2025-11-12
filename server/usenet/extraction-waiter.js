@@ -1,5 +1,5 @@
 /**
- * Wait for video file extraction from RAR archives or direct downloads
+ * Wait for video file extraction from archives (RAR, 7z, etc.) or direct downloads
  * Handles polling for video file availability with timeout
  * ~200 lines of logic extracted from main stream handler
  */
@@ -8,7 +8,6 @@ import fs from 'fs';
 import path from 'path';
 import SABnzbd from '../../lib/sabnzbd.js';
 import { findVideoFile, findVideoFileViaAPI } from './video-finder.js';
-import { check7zArchives, deleteDownloadAndShowError } from './stream-handler.js';
 
 /**
  * Wait for video file to be extracted from download
@@ -43,25 +42,9 @@ export async function waitForFileExtraction(params) {
         console.log(`[USENET] Using folder name from status: ${actualFolderName}`);
     }
 
-    // Check for 7z archives ONCE before the wait loop (if using file server)
-    let checked7z = false;
-    if (fileServerUrl) {
-        const archiveCheck = await check7zArchives(fileServerUrl, actualFolderName, config.fileServerPassword);
-        if (archiveCheck.has7z) {
-            return await deleteDownloadAndShowError(
-                config,
-                nzoId,
-                '7z archives are not supported. Only RAR archives and direct video files are supported. Download has been removed.',
-                res,
-                fileServerUrl
-            );
-        }
-        checked7z = archiveCheck.found !== false;
-    }
-
     // Wait for video file to be extracted - poll more frequently for faster streaming
     const maxWaitForFile = 120000; // 2 minutes max
-    const fileCheckInterval = 1000; // Check every 1 second
+    const fileCheckInterval = 500; // Check every 0.5 seconds (optimized for faster streaming)
     const fileCheckStart = Date.now();
     let searchPath = null;
 
@@ -78,23 +61,6 @@ export async function waitForFileExtraction(params) {
             console.log(`[USENET] Checking for video file in: ${searchPath}`);
 
             if (fileServerUrl) {
-                // Check for 7z if we haven't checked yet
-                if (!checked7z) {
-                    const archiveCheck = await check7zArchives(fileServerUrl, actualFolderName, config.fileServerPassword);
-                    if (archiveCheck.found) {
-                        checked7z = true;
-                        if (archiveCheck.has7z) {
-                            return await deleteDownloadAndShowError(
-                                config,
-                                nzoId,
-                                '7z archives are not supported. Only RAR archives and direct video files are supported. Download has been removed.',
-                                res,
-                                fileServerUrl
-                            );
-                        }
-                    }
-                }
-
                 const fileInfo = await findVideoFileViaAPI(
                     fileServerUrl,
                     decodedTitle,
@@ -212,31 +178,9 @@ export async function waitForFileExtraction(params) {
     const fileExists = isUrl ? true : (videoFilePath && fs.existsSync(videoFilePath));
 
     if (!videoFilePath || !fileExists) {
-        // Check for 7z files one more time
-        if (searchPath && fs.existsSync(searchPath)) {
-            try {
-                const files = fs.readdirSync(searchPath);
-                const has7zFiles = files.some(f => {
-                    const lower = f.toLowerCase();
-                    return lower.endsWith('.7z') || lower.match(/\.7z\.\d+$/);
-                });
-                if (has7zFiles) {
-                    return await deleteDownloadAndShowError(
-                        config,
-                        nzoId,
-                        '7z archives are not supported. Only RAR archives and direct video files are supported. Download has been removed.',
-                        res,
-                        fileServerUrl
-                    );
-                }
-            } catch (e) {
-                // Ignore errors
-            }
-        }
-
         throw new Error(
             `Download in progress: ${status.percentComplete?.toFixed(1) || 0}%. ` +
-            `Video file not yet available via rar2fs. Please try again in a moment.`
+            `Video file not yet available from archive. Please try again in a moment.`
         );
     }
 

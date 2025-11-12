@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Simple HTTP file server for Usenet streaming
-Now with rar2fs support for streaming videos inside RAR archives
+Now with universal archive support for streaming videos inside RAR, 7z, ZIP, and other archives
+Uses fuse-archive or archivemount for transparent FUSE mounting
 """
 
 import os
@@ -852,14 +853,79 @@ def extract_7z_archives(download_dir):
     print("[7Z] Started 7z extraction monitor")
 
 
+def check_command_available(cmd):
+    """Check if a command is available in PATH"""
+    try:
+        subprocess.run([cmd, '--version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return False
+
+
+def mount_archive(src_dir):
+    """
+    Mount the source directory to transparently access files in archives (RAR, 7z, ZIP, etc.).
+    Uses fuse-archive if available (supports all formats), falls back to rar2fs for RAR only.
+    Returns the mount point directory.
+    """
+    mount_point = "/mnt/archivefs"
+
+    # Check if already mounted
+    try:
+        with open('/proc/mounts', 'r') as f:
+            mounts = f.read()
+            if mount_point in mounts and ('fuse-archive' in mounts or 'archivemount' in mounts):
+                print(f"[ARCHIVE] Already mounted at {mount_point}")
+                return mount_point
+    except:
+        pass
+
+    # Create mount point if it doesn't exist
+    os.makedirs(mount_point, exist_ok=True)
+
+    # Try fuse-archive first (supports RAR, 7z, ZIP, TAR, etc.)
+    if check_command_available('fuse-archive'):
+        print(f"[ARCHIVE] Mounting {src_dir} with fuse-archive at {mount_point}")
+        try:
+            subprocess.Popen(
+                ["fuse-archive", "-o", "allow_other", src_dir, mount_point],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            time.sleep(2)
+            print(f"[ARCHIVE] fuse-archive mount initiated, serving from {mount_point}")
+            return mount_point
+        except Exception as e:
+            print(f"❌ Failed to mount with fuse-archive: {e}")
+
+    # Try archivemount as alternative (also supports multiple formats)
+    if check_command_available('archivemount'):
+        print(f"[ARCHIVE] Mounting {src_dir} with archivemount at {mount_point}")
+        try:
+            subprocess.Popen(
+                ["archivemount", "-o", "allow_other", src_dir, mount_point],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            time.sleep(2)
+            print(f"[ARCHIVE] archivemount mount initiated, serving from {mount_point}")
+            return mount_point
+        except Exception as e:
+            print(f"❌ Failed to mount with archivemount: {e}")
+
+    print(f"⚠️  No universal archive FUSE tool available, archives may not be accessible")
+    return src_dir
+
+
 def mount_rar2fs(src_dir):
     """
-    Mount the source directory via rar2fs to transparently extract RAR archives.
+    Legacy function: Mount the source directory via rar2fs (RAR only).
+    Kept for backward compatibility. Consider using mount_archive() instead.
     Returns the mount point directory.
     """
     mount_point = "/mnt/rarfs"
 
-    # Check if rar2fs is already mounted by looking in /proc/mounts
+    # Check if rar2fs is already mounted
     try:
         with open('/proc/mounts', 'r') as f:
             mounts = f.read()
@@ -976,14 +1042,12 @@ Examples:
 
     print(f"📹 Error video cache: {error_cache_dir} ({len(glob.glob(os.path.join(error_cache_dir, 'error_*.mp4')))} cached)")
 
-    # 7z extraction removed - only RAR and direct video files are supported
-
-    # Mount RAR archives transparently using rar2fs
-    rar2fs_mount = mount_rar2fs(args.directory)
+    # Mount archives transparently using FUSE (supports RAR, 7z, ZIP, etc.)
+    archive_mount = mount_archive(args.directory)
 
     # Run server
     try:
-        run_server(rar2fs_mount, args.port, args.bind)
+        run_server(archive_mount, args.port, args.bind)
     except PermissionError:
         print(f"❌ Error: Permission denied. Try using a port above 1024 or run with sudo")
         sys.exit(1)

@@ -266,7 +266,7 @@ Content-Type: video/mp4
 - `File not found`
 - `Download failed`
 - `Extraction failed`
-- `7z archives are not supported`
+- `Archive mounting failed`
 - `Network error`
 
 Error videos are pre-generated at startup for fast response times.
@@ -363,12 +363,13 @@ hypercorn fastapi_file_server:app --bind 0.0.0.0:3003 --workers 4
 The server automatically mounts the source directory via rar2fs at `/mnt/rarfs`.
 
 **Benefits:**
-- Transparent RAR streaming (no extraction)
+- Transparent archive streaming (no extraction required)
+- Supports RAR, 7z, ZIP, and other archive formats
 - Saves disk space
-- Instant access to RAR contents
+- Instant access to archive contents
 
 **Limitations:**
-- Only supports RAR archives (not 7z)
+- Requires `fuse-archive` or `archivemount` for full format support
 - Requires `--privileged` Docker flag or FUSE permissions
 
 ---
@@ -489,18 +490,27 @@ time ls -lh /mnt/rarfs/Release/
 # Configure SABnzbd to not use RAR compression
 ```
 
-### 7z Archives Not Supported
+### 7z Archive Support
 
-**Symptom:** "7z archives are not supported" error video
+**Status:** ✅ 7z archives are now supported via FUSE mounting!
 
-**Explanation:** rar2fs only supports RAR archives. 7z requires extraction.
-
-**Solution:**
-- Configure SABnzbd to prefer RAR or no compression
-- Or manually extract 7z archives:
+**Requirements:**
+- Install `fuse-archive` or `archivemount` on your system:
   ```bash
-  7z x archive.7z -o/downloads/extracted/
+  # Ubuntu/Debian
+  apt-get install fuse-archive
+
+  # Or alternatively
+  apt-get install archivemount
   ```
+
+**How it works:**
+- The file server automatically detects and mounts 7z archives
+- Uses FUSE for transparent streaming (same as RAR support)
+- No manual extraction needed
+
+**Fallback:**
+- If FUSE tools aren't available, RAR-only mode continues via `rar2fs`
 
 ---
 
