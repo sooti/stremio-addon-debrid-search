@@ -2,11 +2,12 @@ FROM ubuntu:22.04
 
 # Use BuildKit cache for faster rebuilds
 # Install system dependencies and build tools + FUSE tools for universal archives
+# Note: Using FUSE 3 only (fuse3 conflicts with fuse2) - rar2fs 1.29.6 supports FUSE 3
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip \
-    fuse libfuse-dev fuse3 libfuse3-dev \
+    fuse3 libfuse3-dev \
     libarchive-dev pkg-config \
     libboost-dev \
     build-essential g++ automake autoconf libtool git \
