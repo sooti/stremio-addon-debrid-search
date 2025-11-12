@@ -43,6 +43,23 @@ curl http://localhost:3003/health
 docker-compose logs -f usenet-server
 ```
 
+**⚡ Faster Docker Builds:**
+
+The Docker image builds from source which can take a few minutes on first build. To speed this up:
+
+```bash
+# Enable Docker BuildKit for faster builds with caching
+export DOCKER_BUILDKIT=1
+
+# Build with BuildKit (caches apt packages and uses parallel compilation)
+docker-compose build usenet-server
+
+# Or build directly
+DOCKER_BUILDKIT=1 docker build -t usenet-file-server .
+```
+
+Subsequent rebuilds will be **much faster** thanks to BuildKit's cache mounts.
+
 ### Manual Installation
 
 ```bash
