@@ -6,7 +6,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip \
-    fuse libfuse-dev \
+    fuse libfuse-dev fuse3 libfuse3-dev \
     libarchive-dev pkg-config \
     libboost-dev \
     build-essential g++ automake autoconf libtool git \
