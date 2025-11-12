@@ -1562,6 +1562,18 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
             }
 
             if (!nzoId) {
+                // Delete ALL incomplete downloads BEFORE submitting new one to free up bandwidth immediately
+                console.log('[USENET] Deleting all incomplete downloads to free bandwidth for new stream...');
+                const deletedCount = await SABnzbd.deleteAllExcept(
+                    config.sabnzbdUrl,
+                    config.sabnzbdApiKey,
+                    null, // No exception - delete everything incomplete
+                    true  // Delete files
+                );
+                if (deletedCount > 0) {
+                    console.log(`[USENET] ✓ Deleted ${deletedCount} incomplete download(s) to free bandwidth`);
+                }
+
                 console.log('[USENET] Submitting NZB to SABnzbd...');
 
                 // Create submission promise and store it
@@ -1592,18 +1604,8 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                     startTime: Date.now(),
                     status: 'downloading'
                 });
-            }
 
-            // Delete all other downloads to free up bandwidth for this new stream
-            console.log('[USENET] Deleting all other downloads to prioritize new stream...');
-            const deletedCount = await SABnzbd.deleteAllExcept(
-                config.sabnzbdUrl,
-                config.sabnzbdApiKey,
-                nzoId,
-                true // Delete files
-            );
-            if (deletedCount > 0) {
-                console.log(`[USENET] ✓ Deleted ${deletedCount} other download(s) to prioritize this stream`);
+                console.log(`[USENET] ✓ New download started, all bandwidth dedicated to: ${decodedTitle}`);
             }
 
             // Don't delete completed folders - they become personal files for instant playback
