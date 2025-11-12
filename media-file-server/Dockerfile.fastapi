@@ -4,8 +4,8 @@ FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip \
     fuse libfuse-dev \
-    fuse-archive archivemount \
-    build-essential automake autoconf libtool \
+    libarchive-dev pkg-config \
+    build-essential automake autoconf libtool git \
     unrar libunrar-dev \
     ffmpeg \
     wget ca-certificates \
@@ -31,6 +31,16 @@ RUN cd /tmp && \
     ldconfig && \
     cd / && \
     rm -rf /tmp/rar2fs-1.29.6* /tmp/unrar*
+
+# Build fuse-archive from source for universal archive support (RAR, 7z, ZIP, etc.)
+RUN cd /tmp && \
+    git clone https://github.com/google/fuse-archive.git && \
+    cd fuse-archive && \
+    make && \
+    cp out/fuse-archive /usr/local/bin/ && \
+    chmod +x /usr/local/bin/fuse-archive && \
+    cd / && \
+    rm -rf /tmp/fuse-archive
 
 # Allow FUSE user_allow_other
 RUN sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf || true

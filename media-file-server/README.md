@@ -494,21 +494,23 @@ time ls -lh /mnt/rarfs/Release/
 
 **Status:** ✅ 7z archives are now fully supported via FUSE mounting!
 
-**What's included:**
-- `fuse-archive` - Universal archive mounting (RAR, 7z, ZIP, TAR, etc.)
-- `archivemount` - Alternative FUSE tool for archive mounting
-- `rar2fs` - Legacy RAR-specific mounting tool
-- All tools are **pre-installed in the Docker container** - no manual setup needed!
+**What's included in Docker:**
+- `fuse-archive` - Google's universal archive mounting tool (RAR, 7z, ZIP, TAR, ISO, etc.)
+- `rar2fs` - RAR-specific mounting tool for backward compatibility
+- Both tools are **built from source and pre-installed** - zero manual setup!
 
 **How it works:**
-- The file server automatically detects archive types (RAR, 7z, ZIP, etc.)
+- File server automatically detects archive types (RAR, 7z, ZIP, etc.)
 - Mounts them transparently using FUSE at `/mnt/archivefs`
 - Streams video directly from mounted archives
-- No manual extraction needed - saves disk space and time
+- No extraction needed - saves disk space and streaming startup time
 
 **Docker requirements:**
 - Must run with `--privileged` flag OR
 - Use `--device /dev/fuse --cap-add SYS_ADMIN` for FUSE access
+
+**Supported formats:**
+- RAR, 7z, ZIP, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, ISO, CPIO and more
 
 ---
 
