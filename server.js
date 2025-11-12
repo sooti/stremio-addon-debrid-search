@@ -1522,7 +1522,29 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
             }
         }
 
-        // Submit NZB to SABnzbd if not already downloading
+        // Before submitting NZB, check if file already exists on file server
+        if (!nzoId && config.fileServerUrl) {
+            console.log('[USENET] Checking file server for existing file before submitting NZB...');
+            const { findVideoFileViaAPI } = await import('./server/usenet/video-finder.js');
+            const existingFile = await findVideoFileViaAPI(
+                config.fileServerUrl,
+                decodedTitle,
+                type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+                config.fileServerPassword
+            );
+
+            if (existingFile) {
+                console.log(`[USENET] ✓ File already exists on file server: ${existingFile.path}`);
+                console.log(`[USENET] Streaming directly from file server (no download needed)`);
+
+                // Redirect to personal file endpoint
+                const encodedPath = existingFile.path.split('/').map(encodeURIComponent).join('/');
+                const configParam = encodeURIComponent(configJson);
+                return res.redirect(307, `/usenet/personal/${encodedPath}?config=${configParam}`);
+            }
+        }
+
+        // Submit NZB to SABnzbd if not already downloading and file not on server
         if (!nzoId) {
             console.log('[USENET] Submitting NZB to SABnzbd...');
             const submitResult = await Usenet.submitNzb(
