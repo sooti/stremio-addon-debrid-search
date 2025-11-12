@@ -8,6 +8,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     python3 python3-pip \
     fuse libfuse-dev \
     libarchive-dev pkg-config \
+    libboost-dev \
     build-essential g++ automake autoconf libtool git \
     unrar libunrar-dev \
     ffmpeg \
