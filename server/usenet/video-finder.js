@@ -25,7 +25,7 @@ export async function findVideoFileViaAPI(fileServerUrl, releaseName, options = 
             headers['X-API-Key'] = apiKey;
         }
         const response = await axios.get(`${fileServerUrl.replace(/\/$/, '')}/api/list`, {
-            timeout: 5000,
+            timeout: 15000, // Increased to 15s for on-demand archive extraction
             validateStatus: (status) => status === 200,
             headers: headers
         });

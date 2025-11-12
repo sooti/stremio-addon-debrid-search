@@ -156,6 +156,41 @@ export async function waitForFileExtraction(params) {
             console.log(`[USENET] ${errorMsg}`);
             throw new Error(errorMsg);
         }
+
+        // Handle 'notfound' status - download may have been removed from queue/history
+        if (status.status === 'notfound') {
+            console.log(`[USENET] Download ${nzoId} not found in SABnzbd queue or history`);
+            console.log(`[USENET] This usually means the download completed and was removed from history`);
+            console.log(`[USENET] Will try to find the file one more time before timing out...`);
+
+            // Try one last time to find the file in complete folder via file server
+            if (fileServerUrl) {
+                const fileInfo = await findVideoFileViaAPI(
+                    fileServerUrl,
+                    decodedTitle,
+                    type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+                    config.fileServerPassword
+                );
+
+                if (fileInfo) {
+                    videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${fileInfo.path}`;
+                    videoFileSize = fileInfo.size;
+                    console.log('[USENET] ✓ Found video file via API after notfound status:', videoFilePath);
+                    break;
+                } else {
+                    throw new Error(
+                        `Download ${nzoId} not found in SABnzbd. ` +
+                        `It may have been removed from history or failed. ` +
+                        `Check SABnzbd history for details.`
+                    );
+                }
+            } else {
+                throw new Error(
+                    `Download ${nzoId} not found in SABnzbd and file server not configured. ` +
+                    `Cannot locate the video file.`
+                );
+            }
+        }
     }
 
     // Check if file was found
