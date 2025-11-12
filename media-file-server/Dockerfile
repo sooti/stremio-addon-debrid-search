@@ -1,47 +1,24 @@
 FROM ubuntu:22.04
 
 # Use BuildKit cache for faster rebuilds
-# System deps + build tools for rar2fs + ffmpeg for error videos
+# Pure Python archive handling - no FUSE needed!
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip \
-    fuse libfuse-dev \
-    build-essential automake autoconf libtool \
-    unrar libunrar-dev \
+    unrar-free \
+    p7zip-full \
     ffmpeg \
     wget ca-certificates
 
-# Build UnRAR library from source (keep source for rar2fs headers)
-RUN cd /tmp && \
-    wget -q https://www.rarlab.com/rar/unrarsrc-6.2.12.tar.gz && \
-    tar xzf unrarsrc-6.2.12.tar.gz && \
-    cd unrar && \
-    make lib && \
-    make install-lib
-
-# Build rar2fs from source (point to unrar source directory)
-RUN cd /tmp && \
-    wget -q https://github.com/hasse69/rar2fs/releases/download/v1.29.6/rar2fs-1.29.6.tar.gz && \
-    tar xzf rar2fs-1.29.6.tar.gz && \
-    cd rar2fs-1.29.6 && \
-    autoreconf -f -i && \
-    ./configure --with-unrar=/tmp/unrar --with-unrar-lib=/usr/local/lib && \
-    make -j$(nproc) && \
-    make install && \
-    ldconfig && \
-    cd / && \
-    rm -rf /tmp/rar2fs-1.29.6* /tmp/unrar*
-
-# allow_other for FUSE mounts
-RUN sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf || true
-
-# Mount point for rar2fs
-RUN mkdir -p /mnt/rarfs
-
-# App
+# App directory
 WORKDIR /app
+
+# Copy Python requirements and install dependencies
+COPY requirements.txt /app/
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Copy application
 COPY usenet_file_server.py /app/usenet_file_server.py
 
-VOLUME ["/mnt/rarfs"]
 ENTRYPOINT ["python3", "/app/usenet_file_server.py"]

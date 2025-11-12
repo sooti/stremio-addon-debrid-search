@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Simple HTTP file server for Usenet streaming
-Now with universal archive support for streaming videos inside RAR, 7z, ZIP, and other archives
-Uses fuse-archive or archivemount for transparent FUSE mounting
+Universal archive support using on-demand extraction (nzbdav-style)
+Supports RAR, 7z, ZIP archives with range request support for seeking
+No FUSE required - pure Python implementation
 """
 
 import os
@@ -17,8 +18,144 @@ import atexit
 import threading
 import glob
 import hashlib
+import zipfile
+import io
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
+
+# Archive handling libraries
+try:
+    import rarfile
+    RARFILE_AVAILABLE = True
+    # Configure rarfile to use unrar-free
+    rarfile.UNRAR_TOOL = "unrar-free"
+except ImportError:
+    RARFILE_AVAILABLE = False
+    print("[WARNING] rarfile not available - RAR support disabled")
+
+try:
+    import py7zr
+    PY7ZR_AVAILABLE = True
+except ImportError:
+    PY7ZR_AVAILABLE = False
+    print("[WARNING] py7zr not available - 7z support disabled")
+
+
+# ========== Archive Handling Functions ==========
+
+def is_archive(filepath):
+    """Check if a file is a supported archive"""
+    if not os.path.isfile(filepath):
+        return False
+    lower = filepath.lower()
+    if lower.endswith('.zip'):
+        return True
+    if RARFILE_AVAILABLE and (lower.endswith('.rar') or re.match(r'.*\.r\d+$', lower) or re.match(r'.*\.part\d+\.rar$', lower)):
+        return True
+    if PY7ZR_AVAILABLE and (lower.endswith('.7z') or re.match(r'.*\.7z\.\d+$', lower)):
+        return True
+    return False
+
+
+def list_archive_contents(archive_path):
+    """List all files in an archive with their sizes
+    Returns: list of dicts with 'name', 'size', 'is_dir' keys
+    """
+    lower = archive_path.lower()
+    files = []
+
+    try:
+        if lower.endswith('.zip'):
+            with zipfile.ZipFile(archive_path, 'r') as zf:
+                for info in zf.infolist():
+                    files.append({
+                        'name': info.filename,
+                        'size': info.file_size,
+                        'is_dir': info.is_dir()
+                    })
+
+        elif RARFILE_AVAILABLE and (lower.endswith('.rar') or re.match(r'.*\.(r\d+|part\d+\.rar)$', lower)):
+            with rarfile.RarFile(archive_path) as rf:
+                for info in rf.infolist():
+                    files.append({
+                        'name': info.filename,
+                        'size': info.file_size,
+                        'is_dir': info.isdir()
+                    })
+
+        elif PY7ZR_AVAILABLE and (lower.endswith('.7z') or re.match(r'.*\.7z\.\d+$', lower)):
+            with py7zr.SevenZipFile(archive_path, 'r') as archive:
+                for name, info in archive.list():
+                    files.append({
+                        'name': name,
+                        'size': info.uncompressed if hasattr(info, 'uncompressed') else 0,
+                        'is_dir': info.is_directory if hasattr(info, 'is_directory') else False
+                    })
+
+    except Exception as e:
+        print(f"[ARCHIVE] Error listing {archive_path}: {e}")
+        return []
+
+    return files
+
+
+def extract_file_from_archive(archive_path, file_in_archive, start_byte=0, end_byte=None):
+    """Extract a specific file from an archive, optionally with byte range
+    Returns: bytes object containing the requested data
+    """
+    lower = archive_path.lower()
+
+    try:
+        if lower.endswith('.zip'):
+            with zipfile.ZipFile(archive_path, 'r') as zf:
+                data = zf.read(file_in_archive)
+                if start_byte or end_byte:
+                    end = end_byte if end_byte is not None else len(data)
+                    return data[start_byte:end]
+                return data
+
+        elif RARFILE_AVAILABLE and (lower.endswith('.rar') or re.match(r'.*\.(r\d+|part\d+\.rar)$', lower)):
+            with rarfile.RarFile(archive_path) as rf:
+                data = rf.read(file_in_archive)
+                if start_byte or end_byte:
+                    end = end_byte if end_byte is not None else len(data)
+                    return data[start_byte:end]
+                return data
+
+        elif PY7ZR_AVAILABLE and (lower.endswith('.7z') or re.match(r'.*\.7z\.\d+$', lower)):
+            with py7zr.SevenZipFile(archive_path, 'r') as archive:
+                extracted = archive.read([file_in_archive])
+                if file_in_archive in extracted:
+                    data = extracted[file_in_archive].read()
+                    if start_byte or end_byte:
+                        end = end_byte if end_byte is not None else len(data)
+                        return data[start_byte:end]
+                    return data
+
+        print(f"[ARCHIVE] Unsupported archive type: {archive_path}")
+        return None
+
+    except Exception as e:
+        print(f"[ARCHIVE] Error extracting {file_in_archive} from {archive_path}: {e}")
+        return None
+
+
+def find_archives_in_directory(directory):
+    """Find all archive files in a directory (non-recursive)
+    Returns: list of archive file paths
+    """
+    archives = []
+    try:
+        for item in os.listdir(directory):
+            item_path = os.path.join(directory, item)
+            if is_archive(item_path):
+                archives.append(item_path)
+    except Exception as e:
+        print(f"[ARCHIVE] Error scanning directory {directory}: {e}")
+    return archives
+
+
+# ========== End Archive Handling Functions ==========
 
 
 class RangeRequestHandler(SimpleHTTPRequestHandler):
@@ -86,6 +223,10 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             # Get the file path
             path = self.translate_path(self.path)
 
+            # Check for archive:// paths (on-demand extraction)
+            if self.path.startswith('/archive://'):
+                return self.handle_archive_extraction()
+
             # If path doesn't exist and it looks like a direct filename request (no subdirectories)
             # try to find it anywhere in the directory tree (flattened access)
             if not os.path.exists(path) and '/' not in self.path.strip('/'):
@@ -121,14 +262,8 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             # Get file size
             file_size = os.path.getsize(path)
 
-            # Check if file is sparse (rar2fs reports full size but hasn't extracted everything)
-            # We can detect this by checking if the file is in a rar2fs mount
-            is_rar2fs = '/mnt/rarfs' in path or '.rar' in path.lower()
-
             print(f"[FILE] Path: {path}")
-            print(f"[FILE] Reported size: {file_size} bytes ({file_size / 1024 / 1024 / 1024:.2f} GB)")
-            if is_rar2fs:
-                print(f"[FILE] rar2fs mount detected - may have sparse/incomplete data")
+            print(f"[FILE] Size: {file_size} bytes ({file_size / 1024 / 1024 / 1024:.2f} GB)")
 
             # Log connection info
             client_ip = self.client_address[0]
@@ -171,17 +306,6 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             if end >= file_size:
                 end = file_size - 1
 
-            # For incomplete rar2fs files, limit response to small chunks to avoid long waits
-            # This allows progressive streaming as data becomes available
-            if is_rar2fs and 'incomplete' in path.lower():
-                original_end = end
-                max_chunk_for_incomplete = 10 * 1024 * 1024  # 10MB chunks for incomplete files
-                requested_length = original_end - start + 1
-
-                if requested_length > max_chunk_for_incomplete:
-                    end = start + max_chunk_for_incomplete - 1
-                    print(f"[INCOMPLETE] Limiting response from {requested_length} bytes ({requested_length/1024/1024:.1f}MB) to {max_chunk_for_incomplete} bytes (10MB)")
-
             content_length = end - start + 1
 
             # Send response headers - always use 206 to encourage range requests
@@ -201,17 +325,13 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
             print(f"[STREAM] 📤 Starting stream: {start}-{end}/{file_size} ({content_length} bytes, {content_length/1024/1024:.2f} MB)")
 
-            # Stream the file - send whatever rar2fs can provide
+            # Stream the file
             chunk_size = 256 * 1024  # 256KB chunks
             bytes_sent = 0
 
             with open(path, 'rb') as f:
                 f.seek(start)
                 remaining = content_length
-                eof_retries = 0
-                # For rar2fs files, be more patient - extraction can be slow
-                max_eof_retries = 60 if is_rar2fs else 10
-                consecutive_empty_reads = 0
 
                 while remaining > 0:
                     # Read chunk
@@ -219,39 +339,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                     chunk = f.read(to_read)
 
                     if not chunk:
-                        # Hit EOF - rar2fs doesn't have more data yet
-                        consecutive_empty_reads += 1
-
-                        # Check if client is still connected before waiting
-                        # Try a zero-byte write to detect broken pipe early
-                        try:
-                            self.wfile.flush()
-                        except (BrokenPipeError, ConnectionResetError):
-                            print(f"[STREAM] Client disconnected while waiting for data (sent {bytes_sent}/{content_length} bytes)")
-                            break
-
-                        # Wait and retry for rar2fs to extract more
-                        if eof_retries < max_eof_retries:
-                            eof_retries += 1
-                            if eof_retries == 1:
-                                current_pos = start + bytes_sent
-                                pos_percent = (current_pos / file_size * 100) if file_size > 0 else 0
-                                print(f"[STREAM] Hit EOF at {bytes_sent}/{content_length} bytes (file pos {pos_percent:.1f}%), waiting for rar2fs extraction...")
-                            elif eof_retries % 10 == 0:
-                                print(f"[STREAM] Still waiting... ({eof_retries}s elapsed)")
-
-                            # Use exponential backoff for retries
-                            wait_time = min(2, 0.1 * (1.5 ** min(eof_retries, 10)))
-                            time.sleep(wait_time)
-                            continue
-                        else:
-                            # Gave up waiting - send what we have
-                            print(f"[STREAM] Timeout waiting for rar2fs after {max_eof_retries}s, sent {bytes_sent}/{content_length} bytes")
-                            break
-
-                    # Reset counters when we successfully read data
-                    eof_retries = 0
-                    consecutive_empty_reads = 0
+                        # Unexpected EOF
+                        print(f"[STREAM] ⚠ Unexpected EOF at {bytes_sent}/{content_length} bytes")
+                        break
 
                     # Send chunk
                     try:
@@ -285,6 +375,140 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             print(f"[SEARCH] Error searching for file: {e}")
         return None
+
+    def handle_archive_extraction(self):
+        """Handle on-demand extraction from archives with range support"""
+        try:
+            # Parse path: /archive://rel/path/to/archive.rar|video.mkv
+            path_without_prefix = self.path[len('/archive://'):]
+
+            # Split on the pipe character
+            if '|' not in path_without_prefix:
+                print(f"[ARCHIVE] Invalid archive path format: {self.path}")
+                self.send_error(400, "Invalid archive path format")
+                return
+
+            archive_rel_path, internal_file = path_without_prefix.split('|', 1)
+
+            # Resolve archive path - check both current dir and /downloads
+            archive_path = None
+            root_dir = os.getcwd()
+
+            # Try relative to current directory first
+            candidate = os.path.join(root_dir, archive_rel_path)
+            if os.path.exists(candidate):
+                archive_path = candidate
+            else:
+                # Try /downloads
+                candidate = os.path.join('/downloads', archive_rel_path)
+                if os.path.exists(candidate):
+                    archive_path = candidate
+
+            if not archive_path or not os.path.exists(archive_path):
+                print(f"[ARCHIVE] Archive not found: {archive_rel_path}")
+                self.send_error(404, f"Archive not found: {archive_rel_path}")
+                return
+
+            print(f"[ARCHIVE] Extracting from: {archive_path}")
+            print(f"[ARCHIVE] Internal file: {internal_file}")
+
+            # Get file info from archive
+            try:
+                archive_contents = list_archive_contents(archive_path)
+                file_info = None
+                for item in archive_contents:
+                    if item['name'] == internal_file:
+                        file_info = item
+                        break
+
+                if not file_info:
+                    print(f"[ARCHIVE] File not found in archive: {internal_file}")
+                    self.send_error(404, f"File not found in archive: {internal_file}")
+                    return
+
+                file_size = file_info['size']
+                print(f"[ARCHIVE] File size: {file_size} bytes ({file_size / 1024 / 1024:.2f} MB)")
+
+            except Exception as e:
+                print(f"[ARCHIVE] Error reading archive contents: {e}")
+                import traceback
+                traceback.print_exc()
+                self.send_error(500, f"Error reading archive: {str(e)}")
+                return
+
+            # Parse range header
+            range_header = self.headers.get('Range')
+            start = 0
+            end = file_size - 1
+            has_range = False
+
+            if range_header:
+                has_range = True
+                match = re.search(r'bytes=(\d+)-(\d*)', range_header)
+                if match:
+                    start = int(match.group(1))
+                    end = int(match.group(2)) if match.group(2) else file_size - 1
+                    seek_percent = (start / file_size * 100) if file_size > 0 else 0
+                    print(f"[ARCHIVE] Range request: {start}-{end} ({seek_percent:.1f}% of file)")
+            else:
+                # No range header - encourage range requests by forcing 206
+                print(f"[ARCHIVE] No range header, forcing 206 response")
+                has_range = True
+
+            # Validate range
+            if start >= file_size:
+                print(f"[ARCHIVE] Range not satisfiable: start={start} >= file_size={file_size}")
+                self.send_error(416, "Requested Range Not Satisfiable")
+                return
+
+            # Adjust end if necessary
+            if end >= file_size:
+                end = file_size - 1
+
+            content_length = end - start + 1
+
+            # Extract the file (or range) from archive
+            print(f"[ARCHIVE] Extracting bytes {start}-{end} ({content_length} bytes, {content_length/1024/1024:.2f} MB)")
+
+            try:
+                # Extract with range support
+                data = extract_file_from_archive(archive_path, internal_file, start, end + 1)
+
+                if not data:
+                    print(f"[ARCHIVE] Extraction returned no data")
+                    self.send_error(500, "Failed to extract file from archive")
+                    return
+
+                # Send response headers
+                if has_range:
+                    self.send_response(206)
+                    self.send_header('Content-Range', f'bytes {start}-{end}/{file_size}')
+                else:
+                    self.send_response(200)
+
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Content-Type', 'application/octet-stream')
+                self.send_header('Accept-Ranges', 'bytes')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+
+                # Send the extracted data
+                self.wfile.write(data)
+
+                print(f"[ARCHIVE] ✓ Sent {len(data)} bytes successfully")
+
+            except Exception as e:
+                print(f"[ARCHIVE] Error extracting file: {e}")
+                import traceback
+                traceback.print_exc()
+                self.send_error(500, f"Error extracting file: {str(e)}")
+                return
+
+        except Exception as e:
+            print(f"[ERROR] Exception in handle_archive_extraction: {e}")
+            import traceback
+            traceback.print_exc()
+            self.send_error(500, "Internal server error")
 
     def handle_check_archives(self):
         """Handle /api/check-archives?folder=xxx endpoint - check for 7z archives in a folder"""
@@ -362,7 +586,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             files = []
             seen_files = set()  # Track filenames to avoid duplicates
 
-            # Scan current working directory (rar2fs mount or source dir)
+            # Scan current working directory
             root_dir = os.getcwd()
             print(f"[LIST] Scanning primary directory: {root_dir}")
             for root, dirs, files_list in os.walk(root_dir):
@@ -424,6 +648,110 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                                 seen_files.add(filename)
                             except Exception as e:
                                 print(f"[LIST] Error stating file {full_path}: {e}")
+
+            # Now scan for archive files and list their video contents
+            print(f"[LIST] Scanning for archive files (RAR, 7z, ZIP)")
+            archives_found = 0
+            videos_in_archives = 0
+
+            # Scan root_dir for archives
+            for root, dirs, files_list in os.walk(root_dir):
+                for archive_file in find_archives_in_directory(root):
+                    archives_found += 1
+                    archive_path = os.path.join(root, archive_file)
+                    rel_archive_path = os.path.relpath(archive_path, root_dir)
+
+                    try:
+                        # List contents of archive
+                        archive_contents = list_archive_contents(archive_path)
+
+                        # Filter for video files
+                        for item in archive_contents:
+                            if item['is_dir']:
+                                continue
+
+                            ext = os.path.splitext(item['name'])[1].lower()
+                            if ext in video_extensions:
+                                filename = os.path.basename(item['name'])
+
+                                # Skip if we already have this filename (avoid duplicates)
+                                if filename in seen_files:
+                                    continue
+
+                                # Mark as complete if NOT in incomplete directory
+                                is_complete = 'incomplete' not in rel_archive_path.lower()
+
+                                # Extract folder name (archive's parent directory)
+                                folder_name = os.path.basename(os.path.dirname(archive_path))
+
+                                # Special path format: archive://rel/path/to/archive.rar|video.mkv
+                                archive_internal_path = f"archive://{rel_archive_path}|{item['name']}"
+
+                                files.append({
+                                    'name': filename,
+                                    'path': archive_internal_path.replace('\\', '/'),
+                                    'flatPath': filename,
+                                    'folderName': folder_name,
+                                    'size': item['size'],
+                                    'modified': os.path.getmtime(archive_path),
+                                    'isComplete': is_complete,
+                                    'inArchive': True  # Flag to indicate this is from an archive
+                                })
+                                seen_files.add(filename)
+                                videos_in_archives += 1
+                    except Exception as e:
+                        print(f"[LIST] Error reading archive {archive_path}: {e}")
+
+            # Scan /downloads for archives too
+            if os.path.exists(downloads_dir) and downloads_dir != root_dir:
+                for root, dirs, files_list in os.walk(downloads_dir):
+                    for archive_file in find_archives_in_directory(root):
+                        archives_found += 1
+                        archive_path = os.path.join(root, archive_file)
+                        rel_archive_path = os.path.relpath(archive_path, downloads_dir)
+
+                        try:
+                            # List contents of archive
+                            archive_contents = list_archive_contents(archive_path)
+
+                            # Filter for video files
+                            for item in archive_contents:
+                                if item['is_dir']:
+                                    continue
+
+                                ext = os.path.splitext(item['name'])[1].lower()
+                                if ext in video_extensions:
+                                    filename = os.path.basename(item['name'])
+
+                                    # Skip if we already have this filename (avoid duplicates)
+                                    if filename in seen_files:
+                                        continue
+
+                                    # Mark as complete if NOT in incomplete directory
+                                    is_complete = 'incomplete' not in rel_archive_path.lower()
+
+                                    # Extract folder name (archive's parent directory)
+                                    folder_name = os.path.basename(os.path.dirname(archive_path))
+
+                                    # Special path format: archive://rel/path/to/archive.rar|video.mkv
+                                    archive_internal_path = f"archive://{rel_archive_path}|{item['name']}"
+
+                                    files.append({
+                                        'name': filename,
+                                        'path': archive_internal_path.replace('\\', '/'),
+                                        'flatPath': filename,
+                                        'folderName': folder_name,
+                                        'size': item['size'],
+                                        'modified': os.path.getmtime(archive_path),
+                                        'isComplete': is_complete,
+                                        'inArchive': True  # Flag to indicate this is from an archive
+                                    })
+                                    seen_files.add(filename)
+                                    videos_in_archives += 1
+                        except Exception as e:
+                            print(f"[LIST] Error reading archive {archive_path}: {e}")
+
+            print(f"[LIST] Found {archives_found} archives containing {videos_in_archives} video files")
 
             # Sort by isComplete first (True before False), then by modification time
             files.sort(key=lambda x: (not x['isComplete'], -x['modified']))
@@ -676,10 +1004,10 @@ def run_server(directory, port=8081, bind='0.0.0.0'):
     server = ThreadingHTTPServer((bind, port), handler)
     server.daemon_threads = True  # Allow threads to exit when main thread exits
 
-    # Count video files to show in startup message
+    # Count video files and archives to show in startup message
     video_extensions = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.3gp', '.ogv', '.ts', '.m2ts']
     video_count = 0
-    rar_count = 0
+    rar_count = 0  # Actually counts all archives (RAR/7z/ZIP)
 
     try:
         for root, dirs, files in os.walk(directory):
@@ -687,23 +1015,24 @@ def run_server(directory, port=8081, bind='0.0.0.0'):
                 ext = os.path.splitext(filename)[1].lower()
                 if ext in video_extensions:
                     video_count += 1
-                elif ext in ['.rar', '.zip'] or re.match(r'\.r\d+$', ext):
+                elif ext in ['.rar', '.zip', '.7z'] or re.match(r'\.r\d+$', ext) or re.match(r'\.7z\.\d+$', ext):
                     rar_count += 1
     except Exception as e:
         print(f"[WARN] Could not scan directory: {e}")
 
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
-║  🎬 Usenet File Server with rar2fs                          ║
+║  🎬 Usenet File Server (RAR/7z/ZIP extraction)              ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  📂 Serving: {directory[:45]:<45} ║
 ║  🌐 Address: http://{bind}:{port:<39} ║
-║  📊 Found {video_count} video files, {rar_count} RAR archives{' ' * (26 - len(str(video_count)) - len(str(rar_count)))}║
+║  📊 Found {video_count} video files, {rar_count} archives{' ' * (32 - len(str(video_count)) - len(str(rar_count)))}║
 ║                                                              ║
 ║  Endpoints:                                                  ║
-║    GET  /<path>        - Stream file with range support     ║
-║    GET  /api/list      - List all video files (JSON)        ║
-║    HEAD /<path>        - Get file metadata                  ║
+║    GET  /<path>             - Stream file with ranges       ║
+║    GET  /archive://<path>   - Extract & stream from archive ║
+║    GET  /api/list           - List all videos (JSON)        ║
+║    HEAD /<path>             - Get file metadata             ║
 ║                                                              ║
 ║  Press Ctrl+C to stop                                        ║
 ╚══════════════════════════════════════════════════════════════╝
@@ -853,115 +1182,9 @@ def extract_7z_archives(download_dir):
     print("[7Z] Started 7z extraction monitor")
 
 
-def check_command_available(cmd):
-    """Check if a command is available in PATH"""
-    try:
-        subprocess.run([cmd, '--version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True
-    except (FileNotFoundError, subprocess.SubprocessError):
-        return False
-
-
-def mount_archive(src_dir):
-    """
-    Mount the source directory to transparently access files in archives (RAR, 7z, ZIP, etc.).
-    Uses fuse-archive if available (supports all formats), falls back to rar2fs for RAR only.
-    Returns the mount point directory.
-    """
-    mount_point = "/mnt/archivefs"
-
-    # Check if already mounted
-    try:
-        with open('/proc/mounts', 'r') as f:
-            mounts = f.read()
-            if mount_point in mounts and ('fuse-archive' in mounts or 'archivemount' in mounts):
-                print(f"[ARCHIVE] Already mounted at {mount_point}")
-                return mount_point
-    except:
-        pass
-
-    # Create mount point if it doesn't exist
-    os.makedirs(mount_point, exist_ok=True)
-
-    # Try fuse-archive first (supports RAR, 7z, ZIP, TAR, etc.)
-    if check_command_available('fuse-archive'):
-        print(f"[ARCHIVE] Mounting {src_dir} with fuse-archive at {mount_point}")
-        try:
-            subprocess.Popen(
-                ["fuse-archive", "-o", "allow_other", src_dir, mount_point],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            time.sleep(2)
-            print(f"[ARCHIVE] fuse-archive mount initiated, serving from {mount_point}")
-            return mount_point
-        except Exception as e:
-            print(f"❌ Failed to mount with fuse-archive: {e}")
-
-    # Try archivemount as alternative (also supports multiple formats)
-    if check_command_available('archivemount'):
-        print(f"[ARCHIVE] Mounting {src_dir} with archivemount at {mount_point}")
-        try:
-            subprocess.Popen(
-                ["archivemount", "-o", "allow_other", src_dir, mount_point],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            time.sleep(2)
-            print(f"[ARCHIVE] archivemount mount initiated, serving from {mount_point}")
-            return mount_point
-        except Exception as e:
-            print(f"❌ Failed to mount with archivemount: {e}")
-
-    print(f"⚠️  No universal archive FUSE tool available, archives may not be accessible")
-    return src_dir
-
-
-def mount_rar2fs(src_dir):
-    """
-    Legacy function: Mount the source directory via rar2fs (RAR only).
-    Kept for backward compatibility. Consider using mount_archive() instead.
-    Returns the mount point directory.
-    """
-    mount_point = "/mnt/rarfs"
-
-    # Check if rar2fs is already mounted
-    try:
-        with open('/proc/mounts', 'r') as f:
-            mounts = f.read()
-            if 'rar2fs' in mounts and mount_point in mounts:
-                print(f"[RAR2FS] Already mounted at {mount_point}")
-                return mount_point
-    except:
-        pass
-
-    # Create mount point if it doesn't exist
-    os.makedirs(mount_point, exist_ok=True)
-
-    print(f"[RAR2FS] Mounting {src_dir} at {mount_point}")
-
-    try:
-        # Mount using rar2fs in background
-        subprocess.Popen(
-            ["rar2fs", "-o", "allow_other", src_dir, mount_point],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-
-        # Give it a moment to mount
-        time.sleep(2)
-
-        print(f"[RAR2FS] Mount initiated, serving from {mount_point}")
-        return mount_point
-
-    except Exception as e:
-        print(f"❌ Failed to mount rar2fs: {e}")
-        return src_dir
-
-
 def main():
     parser = argparse.ArgumentParser(
-        description='Simple HTTP file server for Usenet streaming with rar2fs + range request support',
+        description='Simple HTTP file server for Usenet streaming with on-demand archive extraction',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1042,12 +1265,9 @@ Examples:
 
     print(f"📹 Error video cache: {error_cache_dir} ({len(glob.glob(os.path.join(error_cache_dir, 'error_*.mp4')))} cached)")
 
-    # Mount RAR archives transparently using rar2fs (directory mounting)
-    rar2fs_mount = mount_rar2fs(args.directory)
-
-    # Run server
+    # Run server with on-demand archive extraction (no mounting needed)
     try:
-        run_server(rar2fs_mount, args.port, args.bind)
+        run_server(args.directory, args.port, args.bind)
     except PermissionError:
         print(f"❌ Error: Permission denied. Try using a port above 1024 or run with sudo")
         sys.exit(1)
