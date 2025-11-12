@@ -69,16 +69,8 @@ export async function waitForFileExtraction(params) {
                 );
 
                 if (fileInfo) {
-                    // Clean path
-                    let cleanPath = fileInfo.path;
-                    if (cleanPath.startsWith('incomplete/')) {
-                        cleanPath = cleanPath.substring('incomplete/'.length);
-                    }
-                    if (cleanPath.startsWith('personal/')) {
-                        cleanPath = cleanPath.substring('personal/'.length);
-                    }
-
-                    videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${cleanPath}`;
+                    // Use the full path from the file server (no cleaning needed)
+                    videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${fileInfo.path}`;
                     videoFileSize = fileInfo.size;
                     console.log('[USENET] Found video file via API:', videoFilePath);
                     break;
@@ -133,15 +125,8 @@ export async function waitForFileExtraction(params) {
                     config.fileServerPassword
                 );
                 if (fileInfo) {
-                    let cleanPath = fileInfo.path;
-                    if (cleanPath.startsWith('incomplete/')) {
-                        cleanPath = cleanPath.substring('incomplete/'.length);
-                    }
-                    if (cleanPath.startsWith('personal/')) {
-                        cleanPath = cleanPath.substring('personal/'.length);
-                    }
-
-                    videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${cleanPath}`;
+                    // Use the full path from the file server (no cleaning needed)
+                    videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${fileInfo.path}`;
                     videoFileSize = fileInfo.size;
                     console.log('[USENET] Found video file via API (completed):', videoFilePath);
                     break;

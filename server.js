@@ -1662,19 +1662,8 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                         config.fileServerPassword
                     );
                     if (fileInfo) {
-                        // File server returns { name, path, size }
-                        // Python API returns paths relative to its working directory,
-                        // but sometimes includes 'incomplete/' prefix - strip it if present
-                        let cleanPath = fileInfo.path;
-                        if (cleanPath.startsWith('incomplete/')) {
-                            cleanPath = cleanPath.substring('incomplete/'.length);
-                        }
-                        if (cleanPath.startsWith('personal/')) {
-                            cleanPath = cleanPath.substring('personal/'.length);
-                        }
-
-                        // Construct the URL for the file server
-                        videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${cleanPath}`;
+                        // Use the full path from the file server (no cleaning needed)
+                        videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${fileInfo.path}`;
                         videoFileSize = fileInfo.size; // Store the file size for tracking
                         console.log('[USENET] Found video file via API:', videoFilePath);
                         break; // Exit the waiting loop
@@ -1756,18 +1745,8 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                         config.fileServerPassword
                     );
                     if (fileInfo) {
-                        // File server returns { name, path, size }
-                        // Python API returns paths relative to its working directory,
-                        // but sometimes includes 'incomplete/' or 'personal/' prefix - strip it if present
-                        let cleanPath = fileInfo.path;
-                        if (cleanPath.startsWith('incomplete/')) {
-                            cleanPath = cleanPath.substring('incomplete/'.length);
-                        }
-                        if (cleanPath.startsWith('personal/')) {
-                            cleanPath = cleanPath.substring('personal/'.length);
-                        }
-
-                        videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${cleanPath}`;
+                        // Use the full path from the file server (no cleaning needed)
+                        videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${fileInfo.path}`;
                         videoFileSize = fileInfo.size;
                         console.log('[USENET] Found video file via API (completed):', videoFilePath);
                         break; // Exit the waiting loop
