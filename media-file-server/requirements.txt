@@ -16,6 +16,10 @@ python-multipart==0.0.12
 # Optional: Better JSON performance
 orjson==3.10.10
 
+# Archive handling for on-demand extraction (RAR, 7z, ZIP support)
+rarfile==4.2  # RAR archive support
+py7zr==0.22.0  # 7z archive support
+# zipfile is built into Python standard library
+
 # System utilities (already in Docker)
 # ffmpeg - for error video generation
-# rar2fs - for RAR archive mounting
