@@ -1,9 +1,10 @@
 FROM ubuntu:22.04
 
-# System deps + build tools for rar2fs + ffmpeg for error videos
+# System deps + build tools for rar2fs + FUSE tools for universal archives + ffmpeg for error videos
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip \
     fuse libfuse-dev \
+    fuse-archive archivemount \
     build-essential automake autoconf libtool \
     unrar libunrar-dev \
     ffmpeg \
@@ -34,12 +35,12 @@ RUN cd /tmp && \
 # allow_other for FUSE mounts
 RUN sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf || true
 
-# Mount point
-RUN mkdir -p /mnt/rarfs
+# Mount points for archive filesystems
+RUN mkdir -p /mnt/archivefs /mnt/rarfs
 
 # App
 WORKDIR /app
 COPY usenet_file_server.py /app/usenet_file_server.py
 
-VOLUME ["/mnt/rarfs"]
+VOLUME ["/mnt/archivefs", "/mnt/rarfs"]
 ENTRYPOINT ["python3", "/app/usenet_file_server.py"]
