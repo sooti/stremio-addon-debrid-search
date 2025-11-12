@@ -1042,12 +1042,12 @@ Examples:
 
     print(f"📹 Error video cache: {error_cache_dir} ({len(glob.glob(os.path.join(error_cache_dir, 'error_*.mp4')))} cached)")
 
-    # Mount archives transparently using FUSE (supports RAR, 7z, ZIP, etc.)
-    archive_mount = mount_archive(args.directory)
+    # Mount RAR archives transparently using rar2fs (directory mounting)
+    rar2fs_mount = mount_rar2fs(args.directory)
 
     # Run server
     try:
-        run_server(archive_mount, args.port, args.bind)
+        run_server(rar2fs_mount, args.port, args.bind)
     except PermissionError:
         print(f"❌ Error: Permission denied. Try using a port above 1024 or run with sudo")
         sys.exit(1)

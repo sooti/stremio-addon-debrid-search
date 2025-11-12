@@ -1,38 +1,47 @@
 FROM ubuntu:22.04
 
 # Use BuildKit cache for faster rebuilds
-# System deps + build tools for fuse-archive (universal archive support) + ffmpeg for error videos
+# System deps + build tools for rar2fs + ffmpeg for error videos
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip \
-    fuse3 libfuse3-dev \
-    libarchive-dev pkg-config \
-    libboost-dev \
-    build-essential g++ git \
+    fuse libfuse-dev \
+    build-essential automake autoconf libtool \
+    unrar libunrar-dev \
     ffmpeg \
     wget ca-certificates
 
-# Build fuse-archive from source for universal archive support (RAR, 7z, ZIP, TAR, ISO, etc.)
-# Note: fuse-archive supports RAR natively via libarchive, so we don't need rar2fs
+# Build UnRAR library from source (keep source for rar2fs headers)
 RUN cd /tmp && \
-    git clone --depth 1 https://github.com/google/fuse-archive.git && \
-    cd fuse-archive && \
+    wget -q https://www.rarlab.com/rar/unrarsrc-6.2.12.tar.gz && \
+    tar xzf unrarsrc-6.2.12.tar.gz && \
+    cd unrar && \
+    make lib && \
+    make install-lib
+
+# Build rar2fs from source (point to unrar source directory)
+RUN cd /tmp && \
+    wget -q https://github.com/hasse69/rar2fs/releases/download/v1.29.6/rar2fs-1.29.6.tar.gz && \
+    tar xzf rar2fs-1.29.6.tar.gz && \
+    cd rar2fs-1.29.6 && \
+    autoreconf -f -i && \
+    ./configure --with-unrar=/tmp/unrar --with-unrar-lib=/usr/local/lib && \
     make -j$(nproc) && \
-    cp out/fuse-archive /usr/local/bin/ && \
-    chmod +x /usr/local/bin/fuse-archive && \
+    make install && \
+    ldconfig && \
     cd / && \
-    rm -rf /tmp/fuse-archive
+    rm -rf /tmp/rar2fs-1.29.6* /tmp/unrar*
 
 # allow_other for FUSE mounts
 RUN sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf || true
 
-# Mount point for archive filesystem
-RUN mkdir -p /mnt/archivefs
+# Mount point for rar2fs
+RUN mkdir -p /mnt/rarfs
 
 # App
 WORKDIR /app
 COPY usenet_file_server.py /app/usenet_file_server.py
 
-VOLUME ["/mnt/archivefs"]
+VOLUME ["/mnt/rarfs"]
 ENTRYPOINT ["python3", "/app/usenet_file_server.py"]
