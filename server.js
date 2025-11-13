@@ -1300,7 +1300,18 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
         );
 
         if (!fileInfo) {
-            return res.status(404).send('Video file not found');
+            console.log(`[USENET-UNIVERSAL] ⚠️  Video file not found for: ${decodedReleaseName}`);
+
+            // Show error video explaining the issue
+            if (config.fileServerUrl) {
+                const errorMessage = type === 'series' ?
+                    `Video not found: ${decodedReleaseName}\n\nSeason ${id.split(':')[1]} Episode ${id.split(':')[2]}\n\nThe download may still be in progress, failed, or the file has been removed.\n\nCheck SABnzbd for download status.` :
+                    `Video not found: ${decodedReleaseName}\n\nThe download may still be in progress, failed, or the file has been removed.\n\nCheck SABnzbd for download status.`;
+
+                return await redirectToErrorVideo(errorMessage, res, config.fileServerUrl);
+            }
+
+            return res.status(404).send('Video file not found on file server.\n\nDownload may be in progress or failed.\nCheck SABnzbd for status.');
         }
 
         console.log(`[USENET-UNIVERSAL] Resolved to: ${fileInfo.path}`);
@@ -1704,17 +1715,72 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                 }
 
                 if (nzoId) {
-                    // Add to our memory cache
-                    Usenet.activeDownloads.set(nzoId, {
-                        nzoId: nzoId,
-                        name: decodedTitle,
-                        startTime: Date.now(),
-                        status: existing.status
-                    });
+                    // Check for failed/incomplete/duplicate downloads
+                    const statusLower = existing.status.toLowerCase();
 
-                    // Only delete other INCOMPLETE downloads if this is still downloading
-                    // Don't delete anything if this is already completed
-                    if (existing.status === 'downloading' || existing.status === 'Downloading' || existing.status === 'Paused') {
+                    if (statusLower === 'failed' || statusLower === 'error') {
+                        console.log(`[USENET] ⚠️  Download failed in SABnzbd: ${nzoId}`);
+
+                        // Get failure details
+                        const status = await SABnzbd.getDownloadStatus(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId);
+                        const failMessage = status.failMessage || 'Unknown error';
+
+                        console.log(`[USENET] Failure reason: ${failMessage}`);
+
+                        // Delete the failed download
+                        await SABnzbd.deleteItem(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId, true);
+                        console.log(`[USENET] Deleted failed download, will retry...`);
+
+                        // Check if it's a common failure that we can explain
+                        if (failMessage.toLowerCase().includes('duplicate')) {
+                            // Show error video for duplicate
+                            if (config.fileServerUrl) {
+                                return await redirectToErrorVideo(
+                                    `Download Failed: Duplicate file\n\nThis file already exists or was previously downloaded.\n\nCheck your SABnzbd history or file server for the completed download.`,
+                                    res,
+                                    config.fileServerUrl
+                                );
+                            }
+                        } else if (failMessage.toLowerCase().includes('incomplete') || failMessage.toLowerCase().includes('par2')) {
+                            // Incomplete download or repair failed
+                            if (config.fileServerUrl) {
+                                return await redirectToErrorVideo(
+                                    `Download Failed: Incomplete or corrupted\n\n${failMessage}\n\nThe download was incomplete or could not be repaired. Try a different release or check your Usenet provider.`,
+                                    res,
+                                    config.fileServerUrl
+                                );
+                            }
+                        } else {
+                            // Generic failure
+                            if (config.fileServerUrl) {
+                                return await redirectToErrorVideo(
+                                    `Download Failed\n\n${failMessage}\n\nRetrying download...`,
+                                    res,
+                                    config.fileServerUrl
+                                );
+                            }
+                        }
+
+                        // Reset nzoId so it retries below
+                        nzoId = null;
+                    } else if (statusLower === 'completed') {
+                        // Add to our memory cache
+                        Usenet.activeDownloads.set(nzoId, {
+                            nzoId: nzoId,
+                            name: decodedTitle,
+                            startTime: Date.now(),
+                            status: existing.status
+                        });
+                        console.log('[USENET] Existing download is completed, keeping all other downloads');
+                    } else {
+                        // Still downloading/paused - prioritize it
+                        Usenet.activeDownloads.set(nzoId, {
+                            nzoId: nzoId,
+                            name: decodedTitle,
+                            startTime: Date.now(),
+                            status: existing.status
+                        });
+
                         console.log('[USENET] Deleting other incomplete downloads to prioritize existing stream...');
                         const deletedCount = await SABnzbd.deleteAllExcept(
                             config.sabnzbdUrl,
@@ -1725,8 +1791,6 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                         if (deletedCount > 0) {
                             console.log(`[USENET] ✓ Deleted ${deletedCount} other download(s)`);
                         }
-                    } else {
-                        console.log('[USENET] Existing download is completed, keeping all other downloads');
                     }
                 }
             }
