@@ -1791,6 +1791,40 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
 
     } catch (error) {
         console.error('[USENET-UNIVERSAL] Error:', error.message);
+
+        // Log file server error details if available
+        if (error.response) {
+            console.error(`[USENET-UNIVERSAL] File server returned HTTP ${error.response.status}`);
+            if (error.response.data) {
+                // Try to read the error response body
+                if (typeof error.response.data === 'string') {
+                    console.error(`[USENET-UNIVERSAL] File server error: ${error.response.data}`);
+                } else if (error.response.data.on) {
+                    // It's a stream, try to read it
+                    let errorBody = '';
+                    error.response.data.on('data', chunk => {
+                        errorBody += chunk.toString();
+                    });
+                    error.response.data.on('end', () => {
+                        if (errorBody) {
+                            console.error(`[USENET-UNIVERSAL] File server error: ${errorBody}`);
+                        }
+                    });
+                }
+            }
+
+            // For archive paths that fail with 500, provide helpful message
+            if (fileInfo.path && fileInfo.path.startsWith('archive://')) {
+                console.error(`[USENET-UNIVERSAL] ⚠️  Archive extraction failed`);
+                console.error(`[USENET-UNIVERSAL] Archive path: ${fileInfo.path}`);
+                console.error(`[USENET-UNIVERSAL] This usually means:`);
+                console.error(`[USENET-UNIVERSAL]   1. RAR file is still downloading/incomplete`);
+                console.error(`[USENET-UNIVERSAL]   2. RAR file is corrupted`);
+                console.error(`[USENET-UNIVERSAL]   3. File server missing unrar/rar2fs tools`);
+                console.error(`[USENET-UNIVERSAL]   4. File server archive extraction bug`);
+            }
+        }
+
         if (!res.headersSent) {
             return res.status(500).send('Error streaming file');
         }
