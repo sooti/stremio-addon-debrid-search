@@ -981,6 +981,35 @@ setTimeout(() => {
     });
 }, 10 * 1000);
 
+// Health check for file server - verifies it's accessible
+async function checkFileServerHealth(fileServerUrl, fileServerPassword = null) {
+    try {
+        const axios = (await import('axios')).default;
+        const headers = {};
+        const apiKey = fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
+        if (apiKey) {
+            headers['X-API-Key'] = apiKey;
+        }
+
+        const response = await axios.get(`${fileServerUrl.replace(/\/$/, '')}/api/list`, {
+            timeout: 3000,
+            validateStatus: (status) => status === 200,
+            headers: headers
+        });
+
+        return {
+            healthy: true,
+            fileCount: response.data?.files?.length || 0
+        };
+    } catch (error) {
+        return {
+            healthy: false,
+            error: error.message,
+            code: error.code
+        };
+    }
+}
+
 // Helper function to find video file in directory (including incomplete)
 // Find video file via file server API (uses rar2fs mounted directory)
 async function findVideoFileViaAPI(fileServerUrl, releaseName, options = {}, fileServerPassword = null) {
@@ -1290,6 +1319,20 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
         const decodedReleaseName = decodeURIComponent(releaseName);
         console.log(`[USENET-UNIVERSAL] Stream request for: ${decodedReleaseName}`);
 
+        // Verify file server is accessible before proceeding
+        console.log(`[USENET-UNIVERSAL] Checking file server health...`);
+        const health = await checkFileServerHealth(config.fileServerUrl, config.fileServerPassword);
+        if (!health.healthy) {
+            console.error(`[USENET-UNIVERSAL] ⚠️ File server is not accessible: ${health.error}`);
+
+            const errorMessage = health.code === 'ECONNREFUSED' || health.code === 'ETIMEDOUT' ?
+                `File server is offline or unreachable\n\nServer: ${config.fileServerUrl}\nError: ${health.error}\n\nPlease ensure the file server is running and accessible from this network.` :
+                `File server error: ${health.error}\n\nServer: ${config.fileServerUrl}\n\nPlease check the file server logs and configuration.`;
+
+            return await redirectToErrorVideo(errorMessage, res, config.fileServerUrl);
+        }
+        console.log(`[USENET-UNIVERSAL] ✓ File server healthy (${health.fileCount} files indexed)`);
+
         // Check if there's an active download for this release
         let activeNzoId = null;
         for (const [nzoId, info] of Usenet.activeDownloads.entries()) {
@@ -1314,9 +1357,12 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
             console.log(`[USENET-UNIVERSAL] Waiting for file server to extract files (max 120s)...`);
 
             const maxWaitSeconds = 120;
-            const pollInterval = 2000; // 2 seconds
+            let pollInterval = 2000; // Start with 2 seconds
+            const maxPollInterval = 10000; // Max 10 seconds between polls
             const startTime = Date.now();
             const maxWaitMs = maxWaitSeconds * 1000;
+            let consecutiveFileServerErrors = 0;
+            const maxConsecutiveErrors = 5;
 
             while (Date.now() - startTime < maxWaitMs) {
                 // Check if download still exists and is active
@@ -1351,6 +1397,31 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
                     }
                 }
 
+                // Check file server health before querying
+                const fileServerHealth = await checkFileServerHealth(config.fileServerUrl, config.fileServerPassword);
+                if (!fileServerHealth.healthy) {
+                    consecutiveFileServerErrors++;
+                    console.error(`[USENET-UNIVERSAL] ⚠️ File server health check failed (${consecutiveFileServerErrors}/${maxConsecutiveErrors}): ${fileServerHealth.error}`);
+
+                    if (consecutiveFileServerErrors >= maxConsecutiveErrors) {
+                        console.error(`[USENET-UNIVERSAL] ⚠️ File server unreachable after ${maxConsecutiveErrors} attempts, stopping wait`);
+                        const errorMessage = `File server became unreachable during extraction\n\nServer: ${config.fileServerUrl}\nError: ${fileServerHealth.error}\n\nThe download completed in SABnzbd but the file server is not responding.\nPlease check the file server logs and restart if necessary.`;
+                        return await redirectToErrorVideo(errorMessage, res, config.fileServerUrl);
+                    }
+
+                    // Use exponential backoff when server is having issues
+                    pollInterval = Math.min(pollInterval * 1.5, maxPollInterval);
+                    await new Promise(resolve => setTimeout(resolve, pollInterval));
+                    continue;
+                }
+
+                // Reset error counter on successful health check
+                if (consecutiveFileServerErrors > 0) {
+                    console.log(`[USENET-UNIVERSAL] ✓ File server recovered`);
+                    consecutiveFileServerErrors = 0;
+                    pollInterval = 2000; // Reset to normal polling
+                }
+
                 // Query file server again
                 fileInfo = await findVideoFileViaAPI(
                     config.fileServerUrl,
@@ -1373,6 +1444,43 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
             if (!fileInfo) {
                 const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
                 console.log(`[USENET-UNIVERSAL] ⚠️  Timeout after ${elapsed}s waiting for file extraction`);
+
+                // Check SABnzbd status one final time to provide better diagnostic info
+                let finalDownloadStatus = null;
+                if (activeNzoId && config.sabnzbdUrl && config.sabnzbdApiKey) {
+                    try {
+                        finalDownloadStatus = await SABnzbd.getDownloadStatus(
+                            config.sabnzbdUrl,
+                            config.sabnzbdApiKey,
+                            activeNzoId
+                        );
+                    } catch (error) {
+                        console.error(`[USENET-UNIVERSAL] Error getting final download status: ${error.message}`);
+                    }
+                }
+
+                // Build detailed error message with diagnostics
+                let errorMessage = `File extraction timeout after ${elapsed}s\n\n`;
+                errorMessage += `Release: ${decodedReleaseName}\n`;
+                if (type === 'series') {
+                    errorMessage += `Season ${id.split(':')[1]} Episode ${id.split(':')[2]}\n`;
+                }
+                errorMessage += `\nFile Server: ${config.fileServerUrl}\n`;
+
+                if (finalDownloadStatus) {
+                    errorMessage += `SABnzbd Status: ${finalDownloadStatus.status}\n`;
+                    errorMessage += `Download Progress: ${finalDownloadStatus.percentComplete?.toFixed(1) || 0}%\n\n`;
+                }
+
+                errorMessage += `\nPossible causes:\n`;
+                errorMessage += `• File server extraction is taking longer than 120 seconds\n`;
+                errorMessage += `• File server is not watching the correct directory\n`;
+                errorMessage += `• FUSE mount (rar2fs/7z) is not working\n`;
+                errorMessage += `• File was downloaded to unexpected location\n`;
+                errorMessage += `• File server indexing is delayed or stuck\n\n`;
+                errorMessage += `Check file server logs for more details.`;
+
+                return await redirectToErrorVideo(errorMessage, res, config.fileServerUrl);
             }
         }
 
@@ -1382,8 +1490,8 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
             // Show error video explaining the issue
             if (config.fileServerUrl) {
                 const errorMessage = type === 'series' ?
-                    `Video not found: ${decodedReleaseName}\n\nSeason ${id.split(':')[1]} Episode ${id.split(':')[2]}\n\nThe download may have failed, been removed, or file server extraction is taking too long.\n\nCheck SABnzbd for download status.` :
-                    `Video not found: ${decodedReleaseName}\n\nThe download may have failed, been removed, or file server extraction is taking too long.\n\nCheck SABnzbd for download status.`;
+                    `Video not found: ${decodedReleaseName}\n\nSeason ${id.split(':')[1]} Episode ${id.split(':')[2]}\n\nFile not found on file server.\n\nPossible causes:\n• Download never started\n• File was deleted\n• File server not configured correctly\n\nCheck SABnzbd and file server logs.` :
+                    `Video not found: ${decodedReleaseName}\n\nFile not found on file server.\n\nPossible causes:\n• Download never started\n• File was deleted\n• File server not configured correctly\n\nCheck SABnzbd and file server logs.`;
 
                 return await redirectToErrorVideo(errorMessage, res, config.fileServerUrl);
             }
