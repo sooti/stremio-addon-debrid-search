@@ -1293,7 +1293,7 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
         // Check if there's an active download for this release
         let activeNzoId = null;
         for (const [nzoId, info] of Usenet.activeDownloads.entries()) {
-            if (info.title === decodedReleaseName) {
+            if (info.name === decodedReleaseName) {
                 activeNzoId = nzoId;
                 break;
             }
@@ -1441,7 +1441,7 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
                         if (!fileInfo.isComplete && streamInfo.config?.sabnzbdUrl) {
                             // Try to find the NZO ID
                             for (const [nzoId, info] of Usenet.activeDownloads.entries()) {
-                                if (info.title === decodedReleaseName) {
+                                if (info.name === decodedReleaseName) {
                                     resumeDownloadForSeek(
                                         streamInfo.config.sabnzbdUrl,
                                         streamInfo.config.sabnzbdApiKey,
