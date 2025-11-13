@@ -8,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import SABnzbd from '../../lib/sabnzbd.js';
 import { findVideoFile, findVideoFileViaAPI } from './video-finder.js';
+import { waitForFirstRar } from './rar-handler.js';
 
 /**
  * Wait for video file to be extracted from download
@@ -40,6 +41,30 @@ export async function waitForFileExtraction(params) {
     } else if (status.name) {
         actualFolderName = status.name;
         console.log(`[USENET] Using folder name from status: ${actualFolderName}`);
+    }
+
+    // IMPORTANT: For RAR archives, wait until first RAR file is complete before streaming
+    // This is critical for rar2fs mounting to work properly
+    if (status.status === 'downloading' || status.status === 'Downloading') {
+        const incompletePath = status.incompletePath || (sabnzbdConfig?.incompleteDir ? path.join(sabnzbdConfig.incompleteDir, decodedTitle) : null);
+
+        console.log('[USENET] Checking if first RAR file is complete before streaming...');
+        const rarReady = await waitForFirstRar(
+            config.sabnzbdUrl,
+            config.sabnzbdApiKey,
+            nzoId,
+            incompletePath,
+            120 // Wait up to 120 seconds for first RAR
+        );
+
+        if (!rarReady) {
+            throw new Error(
+                'Timeout waiting for first RAR file to complete. ' +
+                'Please wait a few more seconds and try again.'
+            );
+        }
+
+        console.log('[USENET] ✓ First RAR check passed, proceeding with streaming');
     }
 
     // Wait for video file to be extracted - poll more frequently for faster streaming
