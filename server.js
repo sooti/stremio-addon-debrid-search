@@ -1534,11 +1534,19 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
             }
 
             console.log(`[USENET-UNIVERSAL] Verifying file server can serve with range support...`);
-            const verifyResponse = await axios.head(proxyUrl, {
+            const verifyResponse = await axios.get(proxyUrl, {
                 headers: verifyHeaders,
                 validateStatus: (status) => status === 206 || status === 200,
-                timeout: 10000
+                timeout: 10000,
+                maxContentLength: 1,  // Only download 1 byte
+                maxBodyLength: 1,
+                responseType: 'stream'
             });
+
+            // Destroy the stream immediately - we only needed the status code
+            if (verifyResponse.data && verifyResponse.data.destroy) {
+                verifyResponse.data.destroy();
+            }
 
             if (verifyResponse.status !== 206) {
                 console.log(`[USENET-UNIVERSAL] ⚠️  File server returned ${verifyResponse.status} instead of 206`);
