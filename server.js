@@ -1547,87 +1547,6 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
 
         console.log(`[USENET-UNIVERSAL] Resolved to: ${fileInfo.path}`);
 
-        // Check if this is an incomplete archive file
-        const isArchivePath = fileInfo.path && fileInfo.path.startsWith('archive://');
-        const isIncomplete = fileInfo.isComplete === false;
-
-        if (isArchivePath && isIncomplete && activeNzoId) {
-            console.log(`[USENET-UNIVERSAL] ⚠️  Archive file is still downloading, waiting for completion...`);
-            console.log(`[USENET-UNIVERSAL] Archive files cannot be extracted until download finishes`);
-
-            const maxWaitSeconds = 300; // 5 minutes max wait for archive completion
-            let pollInterval = 5000; // Check every 5 seconds
-            const startTime = Date.now();
-            const maxWaitMs = maxWaitSeconds * 1000;
-            let fileCompleted = false;
-
-            while (Date.now() - startTime < maxWaitMs) {
-                // Check SABnzbd status
-                if (config.sabnzbdUrl && config.sabnzbdApiKey) {
-                    try {
-                        const status = await SABnzbd.getDownloadStatus(
-                            config.sabnzbdUrl,
-                            config.sabnzbdApiKey,
-                            activeNzoId
-                        );
-
-                        // Log progress
-                        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-                        console.log(`[USENET-UNIVERSAL] Archive download progress: ${status.percentComplete?.toFixed(1) || 0}% (${elapsed}s elapsed)`);
-
-                        // Check if download completed
-                        if (status.status === 'completed') {
-                            console.log(`[USENET-UNIVERSAL] ✓ Archive download completed, waiting for file server to update...`);
-                            // Wait a bit for file server to notice the completed file
-                            await new Promise(resolve => setTimeout(resolve, 3000));
-
-                            // Query file server to get updated file info
-                            const updatedFileInfo = await findVideoFileViaAPI(
-                                config.fileServerUrl,
-                                decodedReleaseName,
-                                type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
-                                config.fileServerPassword
-                            );
-
-                            if (updatedFileInfo && updatedFileInfo.isComplete) {
-                                console.log(`[USENET-UNIVERSAL] ✓ Archive extraction ready`);
-                                fileInfo = updatedFileInfo;
-                                fileCompleted = true;
-                                break;
-                            }
-                        }
-
-                        // If download failed, stop waiting
-                        if (status.status === 'failed' || status.status === 'Failed') {
-                            console.log(`[USENET-UNIVERSAL] Download failed, cannot stream from incomplete archive`);
-                            break;
-                        }
-                    } catch (error) {
-                        console.error(`[USENET-UNIVERSAL] Error checking download status: ${error.message}`);
-                    }
-                }
-
-                // Wait before next check
-                await new Promise(resolve => setTimeout(resolve, pollInterval));
-            }
-
-            if (!fileCompleted) {
-                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-                console.error(`[USENET-UNIVERSAL] ⚠️  Timeout waiting for archive download to complete (${elapsed}s)`);
-
-                const errorMessage = `Archive download still in progress\n\n` +
-                    `Release: ${decodedReleaseName}\n` +
-                    `\nArchive files (RAR/7z/ZIP) cannot be streamed\n` +
-                    `until the download is 100% complete.\n\n` +
-                    `The file server uses FUSE mounts (rar2fs/py7zr)\n` +
-                    `which require complete archives for extraction.\n\n` +
-                    `Please wait for the download to finish,\n` +
-                    `then try again.`;
-
-                return await redirectToErrorVideo(errorMessage, res, config.fileServerUrl);
-            }
-        }
-
         // Track this stream
         const streamKey = `universal:${decodedReleaseName}`;
         if (!ACTIVE_USENET_STREAMS.has(streamKey)) {
@@ -1775,7 +1694,7 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
 
         // Verify file server can serve the file with range support before streaming
         // Skip verification for archive:// paths - they need extraction first
-        // isArchivePath already declared earlier in function
+        const isArchivePath = fileInfo.path && fileInfo.path.startsWith('archive://');
 
         if (!isArchivePath) {
             try {
