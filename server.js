@@ -1290,14 +1290,91 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
         const decodedReleaseName = decodeURIComponent(releaseName);
         console.log(`[USENET-UNIVERSAL] Stream request for: ${decodedReleaseName}`);
 
+        // Check if there's an active download for this release
+        let activeNzoId = null;
+        for (const [nzoId, info] of Usenet.activeDownloads.entries()) {
+            if (info.title === decodedReleaseName) {
+                activeNzoId = nzoId;
+                break;
+            }
+        }
+
         // Query file server API to find current file location
         const { findVideoFileViaAPI } = await import('./server/usenet/video-finder.js');
-        const fileInfo = await findVideoFileViaAPI(
+        let fileInfo = await findVideoFileViaAPI(
             config.fileServerUrl,
             decodedReleaseName,
             type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
             config.fileServerPassword
         );
+
+        // If file not found but download is active, wait for extraction to begin
+        if (!fileInfo && activeNzoId) {
+            console.log(`[USENET-UNIVERSAL] File not found yet, but download is active (${activeNzoId})`);
+            console.log(`[USENET-UNIVERSAL] Waiting for file server to extract files (max 120s)...`);
+
+            const maxWaitSeconds = 120;
+            const pollInterval = 2000; // 2 seconds
+            const startTime = Date.now();
+            const maxWaitMs = maxWaitSeconds * 1000;
+
+            while (Date.now() - startTime < maxWaitMs) {
+                // Check if download still exists and is active
+                const downloadInfo = Usenet.activeDownloads.get(activeNzoId);
+                if (!downloadInfo) {
+                    console.log(`[USENET-UNIVERSAL] Download no longer active, stopping wait`);
+                    break;
+                }
+
+                // Check SABnzbd status
+                if (config.sabnzbdUrl && config.sabnzbdApiKey) {
+                    try {
+                        const status = await SABnzbd.getDownloadStatus(
+                            config.sabnzbdUrl,
+                            config.sabnzbdApiKey,
+                            activeNzoId
+                        );
+
+                        // If download failed, stop waiting
+                        if (status.status === 'failed' || status.status === 'Failed') {
+                            console.log(`[USENET-UNIVERSAL] Download failed in SABnzbd, stopping wait`);
+                            break;
+                        }
+
+                        // Log progress periodically
+                        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                        if (Math.floor(elapsed) % 10 === 0) { // Log every 10 seconds
+                            console.log(`[USENET-UNIVERSAL] Waiting... ${status.percentComplete?.toFixed(1) || 0}% downloaded (${elapsed}s elapsed)`);
+                        }
+                    } catch (error) {
+                        console.error(`[USENET-UNIVERSAL] Error checking download status: ${error.message}`);
+                    }
+                }
+
+                // Query file server again
+                fileInfo = await findVideoFileViaAPI(
+                    config.fileServerUrl,
+                    decodedReleaseName,
+                    type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+                    config.fileServerPassword
+                );
+
+                if (fileInfo) {
+                    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                    console.log(`[USENET-UNIVERSAL] ✓ File found after ${elapsed}s: ${fileInfo.path}`);
+                    break;
+                }
+
+                // Wait before next poll
+                await new Promise(resolve => setTimeout(resolve, pollInterval));
+            }
+
+            // If still not found after waiting, show timeout message
+            if (!fileInfo) {
+                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                console.log(`[USENET-UNIVERSAL] ⚠️  Timeout after ${elapsed}s waiting for file extraction`);
+            }
+        }
 
         if (!fileInfo) {
             console.log(`[USENET-UNIVERSAL] ⚠️  Video file not found for: ${decodedReleaseName}`);
@@ -1305,8 +1382,8 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
             // Show error video explaining the issue
             if (config.fileServerUrl) {
                 const errorMessage = type === 'series' ?
-                    `Video not found: ${decodedReleaseName}\n\nSeason ${id.split(':')[1]} Episode ${id.split(':')[2]}\n\nThe download may still be in progress, failed, or the file has been removed.\n\nCheck SABnzbd for download status.` :
-                    `Video not found: ${decodedReleaseName}\n\nThe download may still be in progress, failed, or the file has been removed.\n\nCheck SABnzbd for download status.`;
+                    `Video not found: ${decodedReleaseName}\n\nSeason ${id.split(':')[1]} Episode ${id.split(':')[2]}\n\nThe download may have failed, been removed, or file server extraction is taking too long.\n\nCheck SABnzbd for download status.` :
+                    `Video not found: ${decodedReleaseName}\n\nThe download may have failed, been removed, or file server extraction is taking too long.\n\nCheck SABnzbd for download status.`;
 
                 return await redirectToErrorVideo(errorMessage, res, config.fileServerUrl);
             }
