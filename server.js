@@ -1522,12 +1522,57 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
         console.log(`[USENET-UNIVERSAL] Proxying to: ${proxyUrl}`);
 
         const axios = (await import('axios')).default;
+        const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
+
+        // Verify file server can serve the file with range support before streaming
+        try {
+            const verifyHeaders = {
+                'Range': 'bytes=0-0' // Request first byte to verify 206 support
+            };
+            if (apiKey) {
+                verifyHeaders['X-API-Key'] = apiKey;
+            }
+
+            console.log(`[USENET-UNIVERSAL] Verifying file server can serve with range support...`);
+            const verifyResponse = await axios.head(proxyUrl, {
+                headers: verifyHeaders,
+                validateStatus: (status) => status === 206 || status === 200,
+                timeout: 10000
+            });
+
+            if (verifyResponse.status !== 206) {
+                console.log(`[USENET-UNIVERSAL] ⚠️  File server returned ${verifyResponse.status} instead of 206`);
+
+                if (config.fileServerUrl) {
+                    return await redirectToErrorVideo(
+                        `File server error: Cannot stream file\n\nFile: ${fileInfo.path}\n\nThe file server is not responding with proper range support (HTTP 206). The file may still be extracting or the server may be having issues.`,
+                        res,
+                        config.fileServerUrl
+                    );
+                }
+                return res.status(503).send('File server cannot serve file with range support');
+            }
+
+            console.log(`[USENET-UNIVERSAL] ✓ File server verified, proceeding with stream`);
+        } catch (error) {
+            console.log(`[USENET-UNIVERSAL] ⚠️  File server verification failed: ${error.message}`);
+
+            if (config.fileServerUrl) {
+                return await redirectToErrorVideo(
+                    `File server error: ${error.message}\n\nFile: ${fileInfo.path}\n\nThe file may still be extracting or unavailable. Please wait and try again.`,
+                    res,
+                    config.fileServerUrl
+                );
+            }
+            return res.status(503).send(`File server error: ${error.message}`);
+        }
+
+        // File verified, now stream it
         const headers = {};
         if (req.headers.range) {
             headers['Range'] = req.headers.range;
         }
 
-        const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
         if (apiKey) {
             headers['X-API-Key'] = apiKey;
         }
@@ -1771,6 +1816,19 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
             }
         }
 
+        // Check for pending submission EARLY to prevent race conditions
+        if (!nzoId && PENDING_USENET_SUBMISSIONS.has(decodedTitle)) {
+            console.log('[USENET] Another request is already submitting this NZB, waiting...');
+            try {
+                const pendingResult = await PENDING_USENET_SUBMISSIONS.get(decodedTitle);
+                nzoId = pendingResult.nzoId;
+                console.log('[USENET] Using NZO ID from concurrent submission:', nzoId);
+            } catch (error) {
+                console.log('[USENET] Pending submission failed, will check SABnzbd:', error.message);
+                // Continue to check SABnzbd below if the other request failed
+            }
+        }
+
         // Check SABnzbd queue and history for existing downloads
         if (!nzoId) {
             const existing = await SABnzbd.findDownloadByName(config.sabnzbdUrl, config.sabnzbdApiKey, decodedTitle);
@@ -1897,65 +1955,50 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
 
         // Submit NZB to SABnzbd if not already downloading and file not on server
         if (!nzoId) {
-            // Check for pending submission to prevent race conditions
-            if (PENDING_USENET_SUBMISSIONS.has(decodedTitle)) {
-                console.log('[USENET] Another request is already submitting this NZB, waiting...');
-                try {
-                    const pendingResult = await PENDING_USENET_SUBMISSIONS.get(decodedTitle);
-                    nzoId = pendingResult.nzoId;
-                    console.log('[USENET] Using NZO ID from concurrent submission:', nzoId);
-                } catch (error) {
-                    console.log('[USENET] Pending submission failed, will try again:', error.message);
-                    // Continue to submit below if the other request failed
-                }
+            // Delete ALL incomplete downloads BEFORE submitting new one to free up bandwidth immediately
+            console.log('[USENET] Deleting all incomplete downloads to free bandwidth for new stream...');
+            const deletedCount = await SABnzbd.deleteAllExcept(
+                config.sabnzbdUrl,
+                config.sabnzbdApiKey,
+                null, // No exception - delete everything incomplete
+                true  // Delete files
+            );
+            if (deletedCount > 0) {
+                console.log(`[USENET] ✓ Deleted ${deletedCount} incomplete download(s) to free bandwidth`);
             }
 
-            if (!nzoId) {
-                // Delete ALL incomplete downloads BEFORE submitting new one to free up bandwidth immediately
-                console.log('[USENET] Deleting all incomplete downloads to free bandwidth for new stream...');
-                const deletedCount = await SABnzbd.deleteAllExcept(
-                    config.sabnzbdUrl,
-                    config.sabnzbdApiKey,
-                    null, // No exception - delete everything incomplete
-                    true  // Delete files
-                );
-                if (deletedCount > 0) {
-                    console.log(`[USENET] ✓ Deleted ${deletedCount} incomplete download(s) to free bandwidth`);
-                }
+            console.log('[USENET] Submitting NZB to SABnzbd...');
 
-                console.log('[USENET] Submitting NZB to SABnzbd...');
+            // Create submission promise and store it
+            const submissionPromise = Usenet.submitNzb(
+                config.sabnzbdUrl,
+                config.sabnzbdApiKey,
+                config.newznabUrl,
+                config.newznabApiKey,
+                decodedNzbUrl,
+                decodedTitle
+            );
+            PENDING_USENET_SUBMISSIONS.set(decodedTitle, submissionPromise);
 
-                // Create submission promise and store it
-                const submissionPromise = Usenet.submitNzb(
-                    config.sabnzbdUrl,
-                    config.sabnzbdApiKey,
-                    config.newznabUrl,
-                    config.newznabApiKey,
-                    decodedNzbUrl,
-                    decodedTitle
-                );
-                PENDING_USENET_SUBMISSIONS.set(decodedTitle, submissionPromise);
-
-                try {
-                    const submitResult = await submissionPromise;
-                    nzoId = submitResult.nzoId;
-                } finally {
-                    // Clean up pending submission after 5 seconds
-                    setTimeout(() => {
-                        PENDING_USENET_SUBMISSIONS.delete(decodedTitle);
-                    }, 5000);
-                }
-
-                // Add to memory cache immediately to prevent race conditions
-                Usenet.activeDownloads.set(nzoId, {
-                    nzoId: nzoId,
-                    name: decodedTitle,
-                    startTime: Date.now(),
-                    status: 'downloading'
-                });
-
-                console.log(`[USENET] ✓ New download started, all bandwidth dedicated to: ${decodedTitle}`);
+            try {
+                const submitResult = await submissionPromise;
+                nzoId = submitResult.nzoId;
+            } finally {
+                // Clean up pending submission after 5 seconds
+                setTimeout(() => {
+                    PENDING_USENET_SUBMISSIONS.delete(decodedTitle);
+                }, 5000);
             }
+
+            // Add to memory cache immediately to prevent race conditions
+            Usenet.activeDownloads.set(nzoId, {
+                nzoId: nzoId,
+                name: decodedTitle,
+                startTime: Date.now(),
+                status: 'downloading'
+            });
+
+            console.log(`[USENET] ✓ New download started, all bandwidth dedicated to: ${decodedTitle}`);
 
             // Don't delete completed folders - they become personal files for instant playback
             // Auto-clean will handle old files based on user settings
