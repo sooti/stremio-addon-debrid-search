@@ -43,28 +43,28 @@ export async function waitForFileExtraction(params) {
         console.log(`[USENET] Using folder name from status: ${actualFolderName}`);
     }
 
-    // IMPORTANT: For RAR archives, wait until first RAR file is complete before streaming
-    // This is critical for rar2fs mounting to work properly
+    // IMPORTANT: For archives (RAR/7z/ZIP), wait until first archive file is complete before streaming
+    // This is critical for proper extraction and mounting (rar2fs, py7zr, etc.)
     if (status.status === 'downloading' || status.status === 'Downloading') {
         const incompletePath = status.incompletePath || (sabnzbdConfig?.incompleteDir ? path.join(sabnzbdConfig.incompleteDir, decodedTitle) : null);
 
-        console.log('[USENET] Checking if first RAR file is complete before streaming...');
-        const rarReady = await waitForFirstRar(
+        console.log('[USENET] Checking if first archive file is complete before streaming...');
+        const archiveReady = await waitForFirstRar(
             config.sabnzbdUrl,
             config.sabnzbdApiKey,
             nzoId,
             incompletePath,
-            120 // Wait up to 120 seconds for first RAR
+            120 // Wait up to 120 seconds for first archive file
         );
 
-        if (!rarReady) {
+        if (!archiveReady) {
             throw new Error(
-                'Timeout waiting for first RAR file to complete. ' +
+                'Timeout waiting for first archive file to complete. ' +
                 'Please wait a few more seconds and try again.'
             );
         }
 
-        console.log('[USENET] ✓ First RAR check passed, proceeding with streaming');
+        console.log('[USENET] ✓ First archive check passed, proceeding with streaming');
     }
 
     // Wait for video file to be extracted - poll more frequently for faster streaming
@@ -116,7 +116,7 @@ export async function waitForFileExtraction(params) {
             }
 
             if (!videoFilePath && !fileServerUrl && searchPath && fs.existsSync(searchPath)) {
-                // Check for 7z files - NOT SUPPORTED
+                // Check for archive files - file server handles RAR/7z/ZIP
                 let files = [];
                 try {
                     files = fs.readdirSync(searchPath);
@@ -124,12 +124,13 @@ export async function waitForFileExtraction(params) {
                     console.log(`[USENET] Could not list directory: ${e.message}`);
                 }
 
-                const has7zFiles = files.some(f => {
+                const hasArchiveFiles = files.some(f => {
                     const lower = f.toLowerCase();
-                    return lower.endsWith('.7z') || lower.match(/\.7z\.\d+$/);
+                    return lower.endsWith('.rar') || lower.endsWith('.7z') || lower.endsWith('.zip') ||
+                           lower.match(/\.r\d+$/) || lower.match(/\.7z\.\d+$/) || lower.match(/\.zip\.\d+$/);
                 });
-                if (has7zFiles) {
-                    console.log('[USENET] ⚠️ 7z archive detected - not supported (only RAR and direct video files)');
+                if (hasArchiveFiles) {
+                    console.log('[USENET] Archive detected (RAR/7z/ZIP) - waiting for file server extraction...');
                 }
             }
         }
