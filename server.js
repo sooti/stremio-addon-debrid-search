@@ -1537,54 +1537,61 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
         const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
 
         // Verify file server can serve the file with range support before streaming
-        try {
-            const verifyHeaders = {
-                'Range': 'bytes=0-0' // Request first byte to verify 206 support
-            };
-            if (apiKey) {
-                verifyHeaders['X-API-Key'] = apiKey;
-            }
+        // Skip verification for archive:// paths - they need extraction first
+        const isArchivePath = fileInfo.path && fileInfo.path.startsWith('archive://');
 
-            console.log(`[USENET-UNIVERSAL] Verifying file server can serve with range support...`);
-            const verifyResponse = await axios.get(proxyUrl, {
-                headers: verifyHeaders,
-                validateStatus: (status) => status === 206 || status === 200,
-                timeout: 10000,
-                maxContentLength: 1,  // Only download 1 byte
-                maxBodyLength: 1,
-                responseType: 'stream'
-            });
+        if (!isArchivePath) {
+            try {
+                const verifyHeaders = {
+                    'Range': 'bytes=0-0' // Request first byte to verify 206 support
+                };
+                if (apiKey) {
+                    verifyHeaders['X-API-Key'] = apiKey;
+                }
 
-            // Destroy the stream immediately - we only needed the status code
-            if (verifyResponse.data && verifyResponse.data.destroy) {
-                verifyResponse.data.destroy();
-            }
+                console.log(`[USENET-UNIVERSAL] Verifying file server can serve with range support...`);
+                const verifyResponse = await axios.get(proxyUrl, {
+                    headers: verifyHeaders,
+                    validateStatus: (status) => status === 206 || status === 200,
+                    timeout: 10000,
+                    maxContentLength: 1,  // Only download 1 byte
+                    maxBodyLength: 1,
+                    responseType: 'stream'
+                });
 
-            if (verifyResponse.status !== 206) {
-                console.log(`[USENET-UNIVERSAL] ⚠️  File server returned ${verifyResponse.status} instead of 206`);
+                // Destroy the stream immediately - we only needed the status code
+                if (verifyResponse.data && verifyResponse.data.destroy) {
+                    verifyResponse.data.destroy();
+                }
+
+                if (verifyResponse.status !== 206) {
+                    console.log(`[USENET-UNIVERSAL] ⚠️  File server returned ${verifyResponse.status} instead of 206`);
+
+                    if (config.fileServerUrl) {
+                        return await redirectToErrorVideo(
+                            `File server error: Cannot stream file\n\nFile: ${fileInfo.path}\n\nThe file server is not responding with proper range support (HTTP 206). The file may still be extracting or the server may be having issues.`,
+                            res,
+                            config.fileServerUrl
+                        );
+                    }
+                    return res.status(503).send('File server cannot serve file with range support');
+                }
+
+                console.log(`[USENET-UNIVERSAL] ✓ File server verified, proceeding with stream`);
+            } catch (error) {
+                console.log(`[USENET-UNIVERSAL] ⚠️  File server verification failed: ${error.message}`);
 
                 if (config.fileServerUrl) {
                     return await redirectToErrorVideo(
-                        `File server error: Cannot stream file\n\nFile: ${fileInfo.path}\n\nThe file server is not responding with proper range support (HTTP 206). The file may still be extracting or the server may be having issues.`,
+                        `File server error: ${error.message}\n\nFile: ${fileInfo.path}\n\nThe file may still be extracting or unavailable. Please wait and try again.`,
                         res,
                         config.fileServerUrl
                     );
                 }
-                return res.status(503).send('File server cannot serve file with range support');
+                return res.status(503).send(`File server error: ${error.message}`);
             }
-
-            console.log(`[USENET-UNIVERSAL] ✓ File server verified, proceeding with stream`);
-        } catch (error) {
-            console.log(`[USENET-UNIVERSAL] ⚠️  File server verification failed: ${error.message}`);
-
-            if (config.fileServerUrl) {
-                return await redirectToErrorVideo(
-                    `File server error: ${error.message}\n\nFile: ${fileInfo.path}\n\nThe file may still be extracting or unavailable. Please wait and try again.`,
-                    res,
-                    config.fileServerUrl
-                );
-            }
-            return res.status(503).send(`File server error: ${error.message}`);
+        } else {
+            console.log(`[USENET-UNIVERSAL] Skipping verification for archive path (file server will extract on demand)`);
         }
 
         // File verified, now stream it
