@@ -11,6 +11,11 @@ import {
     STREAM_INACTIVE_TIMEOUT,
     STREAM_MONITOR_INTERVAL
 } from './stream-tracker.js';
+import {
+    updateWatchedVideos,
+    startStorageMonitoring,
+    stopStorageMonitoring
+} from './storage-cleanup.js';
 
 // Store interval IDs for cleanup
 let cleanupIntervalId = null;
@@ -46,6 +51,9 @@ export async function deleteFileFromServer(fileServerUrl, filePath) {
 export async function cleanupInactiveStreams() {
     const now = Date.now();
     console.log('[USENET-CLEANUP] Checking for inactive streams...');
+
+    // Update watched videos tracking for storage-based cleanup
+    updateWatchedVideos();
 
     for (const [streamKey, streamInfo] of ACTIVE_USENET_STREAMS.entries()) {
         const inactiveTime = now - streamInfo.lastAccess;
@@ -373,7 +381,10 @@ export function startCleanupIntervals() {
         });
     }, 10 * 1000);
 
-    console.log('[USENET-CLEANUP] Cleanup intervals started');
+    // Start storage-based cleanup monitoring
+    startStorageMonitoring();
+
+    console.log('[USENET-CLEANUP] Cleanup intervals started (with storage monitoring)');
 }
 
 /**
@@ -400,7 +411,11 @@ export function stopCleanupIntervals() {
         clearTimeout(orphanedCheckTimeoutId);
         orphanedCheckTimeoutId = null;
     }
-    console.log('[USENET-CLEANUP] Cleanup intervals stopped');
+
+    // Stop storage monitoring
+    stopStorageMonitoring();
+
+    console.log('[USENET-CLEANUP] Cleanup intervals stopped (with storage monitoring)');
 }
 
 export default {

@@ -40,6 +40,9 @@ import { resolveHttpStreamUrl } from './lib/http-streams.js';
 import { resolveUHDMoviesUrl } from './lib/uhdmovies.js';
 import searchCoordinator from './lib/util/search-coordinator.js';
 import * as scraperPerformance from './lib/util/scraper-performance.js';
+import { checkStorageBeforeDownload } from './server/usenet/storage-cleanup.js';
+import { startCleanupIntervals, stopCleanupIntervals } from './server/usenet/cleanup.js';
+import { handleSeekRequest, detectSeek, resumeDownloadForSeek } from './server/usenet/seek-handler.js';
 
 // Using SQLite for local caching
 console.log('[CACHE] Using SQLite for local caching');
@@ -1332,15 +1335,77 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
             USENET_CONFIGS.set(config.fileServerUrl, config);
         }
 
-        // Track range requests for completion calculation
+        // Track range requests for completion calculation and seek detection
         if (req.headers.range) {
             const rangeMatch = req.headers.range.match(/bytes=(\d+)-(\d*)/);
             if (rangeMatch) {
                 const startByte = parseInt(rangeMatch[1]);
+                const lastPosition = streamInfo.maxBytePosition || 0;
+
+                // Detect seeks
+                if (fileInfo.size) {
+                    const seekResult = detectSeek(streamInfo, lastPosition, startByte, fileInfo.size);
+
+                    if (seekResult.detected && seekResult.type === 'forward') {
+                        console.log(`[USENET-UNIVERSAL] Forward seek detected, checking if download needs resume...`);
+
+                        // Resume download aggressively for forward seeks
+                        if (!fileInfo.isComplete && streamInfo.config?.sabnzbdUrl) {
+                            // Try to find the NZO ID
+                            for (const [nzoId, info] of Usenet.activeDownloads.entries()) {
+                                if (info.title === decodedReleaseName) {
+                                    resumeDownloadForSeek(
+                                        streamInfo.config.sabnzbdUrl,
+                                        streamInfo.config.sabnzbdApiKey,
+                                        nzoId
+                                    ).catch(err => {
+                                        console.error('[USENET-UNIVERSAL] Failed to resume for seek:', err.message);
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Update max position
                 if (startByte > streamInfo.maxBytePosition) {
                     streamInfo.maxBytePosition = startByte;
                 }
             }
+        }
+
+        // Validate seek request for incomplete files
+        if (!fileInfo.isComplete && req.headers.range) {
+            const seekValidation = await handleSeekRequest(req, streamInfo, fileInfo.size);
+
+            if (!seekValidation.valid) {
+                console.log(`[USENET-UNIVERSAL] ⚠️  Seek to unavailable position: ${seekValidation.message}`);
+
+                if (seekValidation.estimatedWaitSeconds) {
+                    console.log(`[USENET-UNIVERSAL] Estimated wait: ${seekValidation.estimatedWaitSeconds}s at ${seekValidation.downloadSpeedMbps}MB/s`);
+                }
+
+                // Return 503 Service Unavailable with Retry-After header
+                // This tells the client to retry after a certain time
+                res.status(503);
+                if (seekValidation.estimatedWaitSeconds && seekValidation.estimatedWaitSeconds < 300) {
+                    res.set('Retry-After', Math.ceil(seekValidation.estimatedWaitSeconds));
+                }
+                return res.send(
+                    `Buffering... Download at ${seekValidation.currentPercent}%, seeking to ${seekValidation.neededPercent}%\n` +
+                    (seekValidation.estimatedWaitSeconds ?
+                        `Estimated wait: ${seekValidation.estimatedWaitSeconds}s` :
+                        'Please wait for download to progress...')
+                );
+            } else if (seekValidation.status !== 'complete') {
+                console.log(`[USENET-UNIVERSAL] ✓ Seek validated: ${seekValidation.message}`);
+            }
+        }
+
+        // Calculate completion percentage based on max byte position
+        if (fileInfo.size > 0 && streamInfo.maxBytePosition > 0) {
+            streamInfo.completionPercentage = Math.round((streamInfo.maxBytePosition / fileInfo.size) * 100);
         }
 
         // Handle connection close
@@ -1598,25 +1663,14 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
 
         console.log('[USENET] Stream request for:', decodedTitle);
 
-        // Check disk space first
-        const diskSpace = await SABnzbd.getDiskSpace(config.sabnzbdUrl, config.sabnzbdApiKey);
-        if (diskSpace) {
-            if (diskSpace.incompleteDir.lowSpace) {
-                console.log(`[USENET] WARNING: Low disk space in incomplete dir: ${diskSpace.incompleteDir.available}`);
-            }
-            if (diskSpace.completeDir.lowSpace) {
-                console.log(`[USENET] WARNING: Low disk space in complete dir: ${diskSpace.completeDir.available}`);
-            }
-
-            // Return error if critically low (less than 2GB)
-            const criticalThreshold = 2 * 1024 * 1024 * 1024;
-            if (diskSpace.incompleteDir.availableBytes < criticalThreshold) {
-                return res.status(507).send(
-                    `⚠️ Insufficient storage space!\n\n` +
-                    `Available: ${diskSpace.incompleteDir.available}\n` +
-                    `Please free up space on your SABnzbd incomplete directory.`
-                );
-            }
+        // Check disk space and run smart cleanup if needed
+        const hasStorage = await checkStorageBeforeDownload(config.sabnzbdUrl, config.sabnzbdApiKey);
+        if (!hasStorage) {
+            return res.status(507).send(
+                `⚠️ Insufficient storage space!\n\n` +
+                `The system attempted to free space by deleting watched videos, but storage is still critically low.\n` +
+                `Please manually free up space on your SABnzbd storage.`
+            );
         }
 
         // Check if already downloading in our memory cache
@@ -1804,7 +1858,10 @@ let server = null;
 if (import.meta.url === `file://${__filename}`) {
     // Start memory monitoring before server starts
     memoryMonitor.startMonitoring();
-    
+
+    // Start Usenet cleanup intervals
+    startCleanupIntervals();
+
     server = app.listen(PORT, HOST, () => {
         console.log('HTTP server listening on port: ' + server.address().port);
     });
@@ -1813,6 +1870,7 @@ if (import.meta.url === `file://${__filename}`) {
     process.on('SIGINT', () => {
         console.log('\nShutting down standalone server...');
         memoryMonitor.stopMonitoring(); // Stop memory monitoring
+        stopCleanupIntervals(); // Stop Usenet cleanup intervals
         server.close(() => {
             console.log('Server closed');
             process.exit(0);
@@ -1822,6 +1880,7 @@ if (import.meta.url === `file://${__filename}`) {
     process.on('SIGTERM', () => {
         console.log('Received SIGTERM, shutting down gracefully...');
         memoryMonitor.stopMonitoring(); // Stop memory monitoring
+        stopCleanupIntervals(); // Stop Usenet cleanup intervals
         server.close(() => {
             console.log('Server closed');
             process.exit(0);
