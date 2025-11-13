@@ -1447,6 +1447,9 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
 
                 // Check SABnzbd status one final time to provide better diagnostic info
                 let finalDownloadStatus = null;
+                let sabnzbdPath = null;
+                let fileServerFileCount = 0;
+
                 if (activeNzoId && config.sabnzbdUrl && config.sabnzbdApiKey) {
                     try {
                         finalDownloadStatus = await SABnzbd.getDownloadStatus(
@@ -1454,9 +1457,36 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
                             config.sabnzbdApiKey,
                             activeNzoId
                         );
+                        sabnzbdPath = finalDownloadStatus.path;
+                        console.log(`[USENET-UNIVERSAL] SABnzbd reports file at: ${sabnzbdPath || 'unknown'}`);
                     } catch (error) {
                         console.error(`[USENET-UNIVERSAL] Error getting final download status: ${error.message}`);
                     }
+                }
+
+                // Check how many files the file server has indexed
+                try {
+                    const axios = (await import('axios')).default;
+                    const headers = {};
+                    const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
+                    if (apiKey) {
+                        headers['X-API-Key'] = apiKey;
+                    }
+                    const fsResponse = await axios.get(`${config.fileServerUrl.replace(/\/$/, '')}/api/list`, {
+                        timeout: 5000,
+                        validateStatus: (status) => status === 200,
+                        headers: headers
+                    });
+                    fileServerFileCount = fsResponse.data?.files?.length || 0;
+                    console.log(`[USENET-UNIVERSAL] File server currently has ${fileServerFileCount} files indexed`);
+                } catch (error) {
+                    console.error(`[USENET-UNIVERSAL] Error checking file server file count: ${error.message}`);
+                }
+
+                // Log diagnostic info
+                if (sabnzbdPath && finalDownloadStatus?.status === 'completed') {
+                    console.error(`[USENET-UNIVERSAL] ⚠️  DIAGNOSIS: SABnzbd completed download to "${sabnzbdPath}" but file server did not index it`);
+                    console.error(`[USENET-UNIVERSAL] ⚠️  File server is watching the wrong directory OR needs manual refresh`);
                 }
 
                 // Build detailed error message with diagnostics
@@ -1466,19 +1496,35 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
                     errorMessage += `Season ${id.split(':')[1]} Episode ${id.split(':')[2]}\n`;
                 }
                 errorMessage += `\nFile Server: ${config.fileServerUrl}\n`;
+                errorMessage += `File Server Files: ${fileServerFileCount}\n`;
 
                 if (finalDownloadStatus) {
                     errorMessage += `SABnzbd Status: ${finalDownloadStatus.status}\n`;
-                    errorMessage += `Download Progress: ${finalDownloadStatus.percentComplete?.toFixed(1) || 0}%\n\n`;
+                    errorMessage += `Download Progress: ${finalDownloadStatus.percentComplete?.toFixed(1) || 0}%\n`;
+                    if (sabnzbdPath) {
+                        errorMessage += `SABnzbd Path: ${sabnzbdPath}\n`;
+                    }
                 }
 
-                errorMessage += `\nPossible causes:\n`;
-                errorMessage += `• File server extraction is taking longer than 120 seconds\n`;
-                errorMessage += `• File server is not watching the correct directory\n`;
-                errorMessage += `• FUSE mount (rar2fs/7z) is not working\n`;
-                errorMessage += `• File was downloaded to unexpected location\n`;
-                errorMessage += `• File server indexing is delayed or stuck\n\n`;
-                errorMessage += `Check file server logs for more details.`;
+                errorMessage += `\nDIAGNOSIS:\n`;
+                if (finalDownloadStatus && finalDownloadStatus.status === 'completed' && sabnzbdPath) {
+                    errorMessage += `✓ SABnzbd completed download successfully\n`;
+                    errorMessage += `✗ File server did NOT index the file\n\n`;
+                    errorMessage += `The file server is likely watching\n`;
+                    errorMessage += `the wrong directory.\n\n`;
+                    errorMessage += `SABnzbd saved file to:\n${sabnzbdPath}\n\n`;
+                    errorMessage += `Make sure your file server is configured\n`;
+                    errorMessage += `to watch this directory, then restart\n`;
+                    errorMessage += `the file server to refresh its index.`;
+                } else {
+                    errorMessage += `Possible causes:\n`;
+                    errorMessage += `• File server extraction taking >120s\n`;
+                    errorMessage += `• File server watching wrong directory\n`;
+                    errorMessage += `• FUSE mount (rar2fs/7z) not working\n`;
+                    errorMessage += `• Files in unexpected location\n`;
+                    errorMessage += `• File server indexing delayed\n\n`;
+                    errorMessage += `Check file server logs for details.`;
+                }
 
                 return await redirectToErrorVideo(errorMessage, res, config.fileServerUrl);
             }
