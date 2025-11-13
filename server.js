@@ -1392,6 +1392,22 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
             res.setHeader(key, response.headers[key]);
         });
 
+        // Ensure Accept-Ranges is set (file server should send this, but make sure)
+        if (!response.headers['accept-ranges']) {
+            res.setHeader('Accept-Ranges', 'bytes');
+        }
+
+        // Log range request handling
+        if (req.headers.range) {
+            if (response.status === 206) {
+                console.log(`[USENET-UNIVERSAL] ✓ Range request successful: ${response.headers['content-range']}`);
+            } else if (response.status === 416) {
+                console.log(`[USENET-UNIVERSAL] ⚠️ Range not satisfiable - file may still be extracting`);
+            } else if (response.status === 200) {
+                console.log(`[USENET-UNIVERSAL] Range request ignored by file server, sending full file`);
+            }
+        }
+
         // Update file size and completion
         if (response.headers['content-range']) {
             const rangeMatch = response.headers['content-range'].match(/bytes \d+-\d+\/(\d+)/);
