@@ -1418,6 +1418,17 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
         streamInfo.lastAccess = Date.now();
         streamInfo.activeConnections++;
 
+        // Update file size - it changes as download progresses
+        // IMPORTANT: Always use current file size to avoid stale calculations
+        streamInfo.fileSize = fileInfo.size || streamInfo.fileSize || 0;
+
+        // Cap maxBytePosition to current file size to prevent invalid calculations
+        // File size from API can fluctuate as download progresses
+        if (streamInfo.maxBytePosition > streamInfo.fileSize) {
+            console.log(`[USENET-UNIVERSAL] Capping maxBytePosition from ${streamInfo.maxBytePosition} to current file size ${streamInfo.fileSize}`);
+            streamInfo.maxBytePosition = streamInfo.fileSize;
+        }
+
         // Store config for auto-clean
         if (config.fileServerUrl && config.autoCleanOldFiles) {
             USENET_CONFIGS.set(config.fileServerUrl, config);
@@ -1430,9 +1441,9 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
                 const startByte = parseInt(rangeMatch[1]);
                 const lastPosition = streamInfo.maxBytePosition || 0;
 
-                // Detect seeks
-                if (fileInfo.size) {
-                    const seekResult = detectSeek(streamInfo, lastPosition, startByte, fileInfo.size);
+                // Detect seeks using CURRENT file size
+                if (streamInfo.fileSize > 0) {
+                    const seekResult = detectSeek(streamInfo, lastPosition, startByte, streamInfo.fileSize);
 
                     if (seekResult.detected && seekResult.type === 'forward') {
                         console.log(`[USENET-UNIVERSAL] Forward seek detected, checking if download needs resume...`);
@@ -1456,8 +1467,8 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
                     }
                 }
 
-                // Update max position
-                if (startByte > streamInfo.maxBytePosition) {
+                // Update max position, but never exceed current file size
+                if (startByte > streamInfo.maxBytePosition && startByte <= streamInfo.fileSize) {
                     streamInfo.maxBytePosition = startByte;
                 }
             }
@@ -1465,7 +1476,7 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
 
         // Validate seek request for incomplete files
         if (!fileInfo.isComplete && req.headers.range) {
-            const seekValidation = await handleSeekRequest(req, streamInfo, fileInfo.size);
+            const seekValidation = await handleSeekRequest(req, streamInfo, streamInfo.fileSize);
 
             if (!seekValidation.valid) {
                 console.log(`[USENET-UNIVERSAL] ⚠️  Seek to unavailable position: ${seekValidation.message}`);
@@ -1492,8 +1503,9 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
         }
 
         // Calculate completion percentage based on max byte position
-        if (fileInfo.size > 0 && streamInfo.maxBytePosition > 0) {
-            streamInfo.completionPercentage = Math.round((streamInfo.maxBytePosition / fileInfo.size) * 100);
+        // Use streamInfo.fileSize (current size) to prevent overflow from stale data
+        if (streamInfo.fileSize > 0 && streamInfo.maxBytePosition > 0) {
+            streamInfo.completionPercentage = Math.min(100, Math.round((streamInfo.maxBytePosition / streamInfo.fileSize) * 100));
         }
 
         // Handle connection close
