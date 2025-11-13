@@ -50,10 +50,17 @@ export async function deleteFileFromServer(fileServerUrl, filePath) {
  */
 export async function cleanupInactiveStreams() {
     const now = Date.now();
-    console.log('[USENET-CLEANUP] Checking for inactive streams...');
 
     // Update watched videos tracking for storage-based cleanup
     updateWatchedVideos();
+
+    // Silently skip if no streams to check
+    if (ACTIVE_USENET_STREAMS.size === 0) {
+        return;
+    }
+
+    // Only log if we have streams to potentially clean up
+    console.log(`[USENET-CLEANUP] Checking ${ACTIVE_USENET_STREAMS.size} active stream(s) for inactivity...`);
 
     for (const [streamKey, streamInfo] of ACTIVE_USENET_STREAMS.entries()) {
         const inactiveTime = now - streamInfo.lastAccess;
@@ -223,12 +230,15 @@ export async function monitorStreamDownloads() {
     const totalStreams = ACTIVE_USENET_STREAMS.size;
     const nonPersonalStreams = Array.from(ACTIVE_USENET_STREAMS.values()).filter(s => !s.isPersonal).length;
 
+    // Silently skip if no streams
     if (totalStreams === 0) {
-        console.log('[USENET-MONITOR] No active streams to monitor');
         return;
     }
 
-    console.log(`[USENET-MONITOR] Checking ${nonPersonalStreams} stream(s) (${totalStreams} total, ${totalStreams - nonPersonalStreams} personal)...`);
+    // Only log if we have non-personal streams to actually monitor
+    if (nonPersonalStreams > 0) {
+        console.log(`[USENET-MONITOR] Checking ${nonPersonalStreams} stream(s) (${totalStreams} total, ${totalStreams - nonPersonalStreams} personal)...`);
+    }
 
     for (const [nzoId, streamInfo] of ACTIVE_USENET_STREAMS.entries()) {
         // Skip personal files (no download to monitor)
@@ -244,11 +254,18 @@ export async function monitorStreamDownloads() {
                 nzoId
             );
 
-            // Skip if not paused or not downloading
+            // Skip if not paused or not downloading (only log on status change)
             if (status.status !== 'Paused' && status.status !== 'downloading') {
-                console.log(`[USENET-MONITOR] Skipping ${nzoId}: status is "${status.status}" (not Paused/downloading)`);
+                // Only log when status changes to avoid spam
+                if (streamInfo.lastMonitoredStatus !== status.status) {
+                    console.log(`[USENET-MONITOR] ${nzoId} status: "${status.status}" (no longer monitoring)`);
+                    streamInfo.lastMonitoredStatus = status.status;
+                }
                 continue;
             }
+
+            // Update last monitored status
+            streamInfo.lastMonitoredStatus = status.status;
 
             // Calculate playback percentage
             const playbackPercent = streamInfo.fileSize > 0
