@@ -1262,6 +1262,160 @@ app.get('/usenet/poll/:nzbUrl/:title/:type/:id', async (req, res) => {
     }
 });
 
+// Universal Usenet streaming endpoint - dynamically resolves file location
+// This endpoint queries the file server API to find the current file path
+// Works even when files move from incomplete/ to personal/ during completion
+app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
+    const { releaseName, type, id } = req.params;
+
+    try {
+        const configJson = req.query.config;
+        if (!configJson) {
+            return res.status(400).send('Missing configuration');
+        }
+
+        const decodedConfigJson = decodeURIComponent(configJson);
+        if (decodedConfigJson.length > 100000) {
+            return res.status(400).send('Config parameter too large');
+        }
+        const config = JSON.parse(decodedConfigJson);
+
+        if (!config.fileServerUrl) {
+            return res.status(400).send('File server not configured');
+        }
+
+        const decodedReleaseName = decodeURIComponent(releaseName);
+        console.log(`[USENET-UNIVERSAL] Stream request for: ${decodedReleaseName}`);
+
+        // Query file server API to find current file location
+        const { findVideoFileViaAPI } = await import('./server/usenet/video-finder.js');
+        const fileInfo = await findVideoFileViaAPI(
+            config.fileServerUrl,
+            decodedReleaseName,
+            type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+            config.fileServerPassword
+        );
+
+        if (!fileInfo) {
+            return res.status(404).send('Video file not found');
+        }
+
+        console.log(`[USENET-UNIVERSAL] Resolved to: ${fileInfo.path}`);
+
+        // Track this stream
+        const streamKey = `universal:${decodedReleaseName}`;
+        if (!ACTIVE_USENET_STREAMS.has(streamKey)) {
+            ACTIVE_USENET_STREAMS.set(streamKey, {
+                lastAccess: Date.now(),
+                streamCount: 1,
+                activeConnections: 0,
+                maxBytePosition: 0,
+                fileSize: fileInfo.size || 0,
+                completionPercentage: 0,
+                config: {
+                    sabnzbdUrl: config.sabnzbdUrl,
+                    sabnzbdApiKey: config.sabnzbdApiKey
+                },
+                videoFilePath: fileInfo.path,
+                usenetConfig: config,
+                releaseName: decodedReleaseName,
+                isUniversal: true
+            });
+        }
+
+        const streamInfo = ACTIVE_USENET_STREAMS.get(streamKey);
+        streamInfo.lastAccess = Date.now();
+        streamInfo.activeConnections++;
+
+        // Store config for auto-clean
+        if (config.fileServerUrl && config.autoCleanOldFiles) {
+            USENET_CONFIGS.set(config.fileServerUrl, config);
+        }
+
+        // Track range requests for completion calculation
+        if (req.headers.range) {
+            const rangeMatch = req.headers.range.match(/bytes=(\d+)-(\d*)/);
+            if (rangeMatch) {
+                const startByte = parseInt(rangeMatch[1]);
+                if (startByte > streamInfo.maxBytePosition) {
+                    streamInfo.maxBytePosition = startByte;
+                }
+            }
+        }
+
+        // Handle connection close
+        req.on('close', () => {
+            streamInfo.activeConnections--;
+            console.log(`[USENET-UNIVERSAL] Connection closed for ${streamKey}, active: ${streamInfo.activeConnections}`);
+
+            if (streamInfo.activeConnections === 0 && streamInfo.usenetConfig?.deleteOnStreamStop) {
+                const completionThreshold = 90;
+                if (streamInfo.completionPercentage >= completionThreshold) {
+                    console.log(`[USENET-UNIVERSAL] Stream finished (${streamInfo.completionPercentage}%), scheduling delete`);
+                    setTimeout(async () => {
+                        if (streamInfo.activeConnections === 0) {
+                            console.log(`[USENET-UNIVERSAL] Deleting finished file: ${fileInfo.path}`);
+                            await deleteFileFromServer(streamInfo.usenetConfig.fileServerUrl, fileInfo.path);
+                            ACTIVE_USENET_STREAMS.delete(streamKey);
+                        }
+                    }, 30000);
+                }
+            }
+        });
+
+        // Proxy to file server
+        const fileServerUrl = config.fileServerUrl.replace(/\/$/, '');
+        const proxyUrl = `${fileServerUrl}/${fileInfo.path}`;
+        console.log(`[USENET-UNIVERSAL] Proxying to: ${proxyUrl}`);
+
+        const axios = (await import('axios')).default;
+        const headers = {};
+        if (req.headers.range) {
+            headers['Range'] = req.headers.range;
+        }
+
+        const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
+        if (apiKey) {
+            headers['X-API-Key'] = apiKey;
+        }
+
+        const response = await axios.get(proxyUrl, {
+            headers,
+            responseType: 'stream',
+            validateStatus: (status) => status < 500,
+            timeout: 60000
+        });
+
+        // Forward response
+        res.status(response.status);
+        Object.keys(response.headers).forEach(key => {
+            res.setHeader(key, response.headers[key]);
+        });
+
+        // Update file size and completion
+        if (response.headers['content-range']) {
+            const rangeMatch = response.headers['content-range'].match(/bytes \d+-\d+\/(\d+)/);
+            if (rangeMatch) {
+                streamInfo.fileSize = parseInt(rangeMatch[1]);
+            }
+        } else if (response.headers['content-length']) {
+            streamInfo.fileSize = parseInt(response.headers['content-length']);
+        }
+
+        if (streamInfo.fileSize > 0) {
+            streamInfo.completionPercentage = Math.round((streamInfo.maxBytePosition / streamInfo.fileSize) * 100);
+        }
+
+        response.data.pipe(res);
+
+    } catch (error) {
+        console.error('[USENET-UNIVERSAL] Error:', error.message);
+        if (!res.headersSent) {
+            return res.status(500).send('Error streaming file');
+        }
+    }
+});
+
 // Personal file streaming endpoint (files already on server)
 // PROXY through Node.js to track when stream stops
 app.get('/usenet/personal/*', async (req, res) => {
@@ -1614,916 +1768,17 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
 
         }
 
-        // Check current download status
-        let status = await SABnzbd.getDownloadStatus(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId);
-
-        // Only wait if download hasn't reached 5% yet
-        if ((status.percentComplete || 0) < 5 && status.status !== 'completed') {
-            console.log('[USENET] Waiting for download to start...');
-            try {
-                status = await Usenet.waitForStreamingReady(
-                    config.sabnzbdUrl,
-                    config.sabnzbdApiKey,
-                    nzoId,
-                    5, // 5% minimum - ensure enough data for initial streaming
-                    60000 // 1 minute max wait for download to start
-                );
-            } catch (error) {
-                console.log(`[USENET] Download failed or timed out: ${error.message}`);
-
-                // Delete the failed download
-                try {
-                    await SABnzbd.deleteItem(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId, true);
-                    console.log(`[USENET] Deleted failed download: ${nzoId}`);
-                } catch (deleteError) {
-                    console.log(`[USENET] Could not delete failed download: ${deleteError.message}`);
-                }
-
-                // Return error video
-                const fileServerUrl = config.fileServerUrl || process.env.USENET_FILE_SERVER_URL;
-                if (fileServerUrl) {
-                    let errorMessage = 'Download failed or timed out';
-                    if (error.message.includes('Aborted')) {
-                        errorMessage = 'Download failed - file incomplete or missing from Usenet servers';
-                    } else if (error.message.includes('Timeout')) {
-                        errorMessage = 'Download timed out - file may be missing or too slow';
-                    }
-                    return redirectToErrorVideo(errorMessage, res, fileServerUrl);
-                } else {
-                    return res.status(500).send(error.message);
-                }
-            }
-        } else {
-            console.log(`[USENET] Download already at ${status.percentComplete?.toFixed(1)}%, skipping wait`);
-        }
-
-        let videoFilePath = null;
-        let videoFileSize = 0; // Track file size from API
-
-        // Get SABnzbd config to find the incomplete directory
-        const sabnzbdConfig = await SABnzbd.getConfig(config.sabnzbdUrl, config.sabnzbdApiKey);
-        console.log('[USENET] SABnzbd directories:', {
-            downloadDir: sabnzbdConfig?.downloadDir,
-            incompleteDir: sabnzbdConfig?.incompleteDir
-        });
-
-        let searchPath = null;
-
-        // Check if using file server API (for archivemount mounted directory) - declare outside loop
-        const fileServerUrl = config.fileServerUrl || process.env.USENET_FILE_SERVER_URL;
-
-        // Extract actual folder name from status (SABnzbd may append .1, .2 etc if folder exists)
-        // Use basename of incompletePath if available, otherwise use status.name
-        let actualFolderName = decodedTitle;
-        if (status.incompletePath) {
-            actualFolderName = path.basename(status.incompletePath);
-            console.log(`[USENET] Using actual folder name from SABnzbd: ${actualFolderName}`);
-        } else if (status.name) {
-            actualFolderName = status.name;
-            console.log(`[USENET] Using folder name from status: ${actualFolderName}`);
-        }
-
-        // Wait for video file to be extracted - poll more frequently for faster streaming
-        const maxWaitForFile = 120000; // 2 minutes max
-        const fileCheckInterval = 1000; // Check every 1 second (faster detection)
-        const fileCheckStart = Date.now();
-
-        while (Date.now() - fileCheckStart < maxWaitForFile) {
-            // Try to find video file in incomplete folder first (for progressive streaming)
-            if (status.status === 'downloading') {
-                // Build path to incomplete download folder
-                if (sabnzbdConfig?.incompleteDir) {
-                    searchPath = path.join(sabnzbdConfig.incompleteDir, decodedTitle);
-                } else if (status.incompletePath) {
-                    searchPath = status.incompletePath;
-                }
-
-                // Log what we're checking
-                console.log(`[USENET] Checking for video file in: ${searchPath}`);
-
-                // Look for release name folder in incomplete directory
-                // RAR files are mounted transparently via archivemount python server
-
-                if (fileServerUrl) {
-                    // Query the file server API directly (don't check local filesystem)
-                    // The file server has its own filesystem access and FUSE archive mounting
-
-                    const fileInfo = await findVideoFileViaAPI(
-                        fileServerUrl,
-                        decodedTitle,
-                        type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
-                        config.fileServerPassword
-                    );
-                    if (fileInfo) {
-                        // Use the full path from the file server (no cleaning needed)
-                        videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${fileInfo.path}`;
-                        videoFileSize = fileInfo.size; // Store the file size for tracking
-                        console.log('[USENET] Found video file via API:', videoFilePath);
-                        break; // Exit the waiting loop
-                    } else {
-                        console.log(`[USENET] Video file not found yet via API. Progress: ${status.percentComplete?.toFixed(1) || 0}%`);
-                    }
-                } else if (searchPath && fs.existsSync(searchPath)) {
-                    // Fallback to direct filesystem search (no rar2fs)
-                    // List what's in the directory
-                    let files = [];
-                    try {
-                        files = fs.readdirSync(searchPath);
-                        console.log(`[USENET] Files in download directory (${files.length}):`, files.slice(0, 5).join(', '));
-                    } catch (e) {
-                        console.log(`[USENET] Could not list directory: ${e.message}`);
-                    }
-
-                    videoFilePath = await findVideoFile(
-                        searchPath,
-                        decodedTitle,
-                        type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {}
-                    );
-                    if (videoFilePath) {
-                        console.log('[USENET] Found video file in download folder:', videoFilePath);
-                        break; // Exit the waiting loop
-                    }
-                }
-
-                if (!videoFilePath && !fileServerUrl && searchPath && fs.existsSync(searchPath)) {
-                    // Check for archives if we're not using file server
-                    let files = [];
-                    try {
-                        files = fs.readdirSync(searchPath);
-                    } catch (e) {
-                        console.log(`[USENET] Could not list directory: ${e.message}`);
-                    }
-
-                    // Check for archive files (RAR, 7z, ZIP)
-                    const has7zFiles = files.some(f => {
-                        const lower = f.toLowerCase();
-                        return lower.endsWith('.7z') || lower.match(/\.7z\.\d+$/);
-                    });
-                    if (has7zFiles) {
-                        console.log('[USENET] ⚠️ 7z archive detected - ensure fuse-archive is installed on file server');
-                    }
-
-                    // Check if we see RAR files (FUSE will mount them transparently)
-                    const hasRarFiles = files.some(f =>
-                        f.toLowerCase().endsWith('.rar') ||
-                        f.toLowerCase().match(/\.r\d+$/) ||
-                        f.toLowerCase().endsWith('.zip')
-                    );
-                    if (hasRarFiles) {
-                        console.log('[USENET] ⚠️ RAR/ZIP archives detected - waiting for FUSE to mount them');
-                    } else {
-                        console.log('[USENET] No video file found yet, download may still be in progress');
-                    }
-                }
-
-                if (!videoFilePath && !fileServerUrl && !fs.existsSync(searchPath)) {
-                    console.log(`[USENET] Path does not exist yet: ${searchPath}`);
-                }
-            }
-
-            // If complete, get from complete folder
-            if (status.status === 'completed' && status.path) {
-                console.log('[USENET] Download completed, looking in complete folder:', status.path);
-
-                // Check if there are RAR files - use file server API with rar2fs
-                const hasRarFiles = fs.existsSync(status.path) &&
-                    fs.readdirSync(status.path).some(f => f.toLowerCase().match(/\.(rar|r\d+)$/));
-
-                if (hasRarFiles && fileServerUrl) {
-                    console.log('[USENET] Completed RAR archive detected, using file server API with rar2fs');
-                    const fileInfo = await findVideoFileViaAPI(
-                        fileServerUrl,
-                        decodedTitle,
-                        type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
-                        config.fileServerPassword
-                    );
-                    if (fileInfo) {
-                        // Use the full path from the file server (no cleaning needed)
-                        videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${fileInfo.path}`;
-                        videoFileSize = fileInfo.size;
-                        console.log('[USENET] Found video file via API (completed):', videoFilePath);
-                        break; // Exit the waiting loop
-                    }
-                } else {
-                    // Direct video file (no RAR) - use filesystem
-                    videoFilePath = await findVideoFile(
-                        status.path,
-                        decodedTitle,
-                        type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {}
-                    );
-                    if (videoFilePath) {
-                        console.log('[USENET] Found direct video file (completed):', videoFilePath);
-                        break; // Exit the waiting loop
-                    }
-                }
-            }
-
-            // File not found yet, wait and refresh status
-            console.log(`[USENET] Video file not extracted yet, waiting... Progress: ${status.percentComplete?.toFixed(1) || 0}%`);
-            await new Promise(resolve => setTimeout(resolve, fileCheckInterval));
-            status = await SABnzbd.getDownloadStatus(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId);
-
-            // Check for failures
-            if (status.status === 'error' || status.status === 'failed') {
-                const errorMsg = `Download failed: ${status.error || status.failMessage || 'Unknown error'}`;
-                console.log(`[USENET] ${errorMsg}`);
-                const fileServerUrl = config.fileServerUrl || process.env.USENET_FILE_SERVER_URL;
-                if (!fileServerUrl) {
-                    return res.status(500).send(errorMsg);
-                }
-                return redirectToErrorVideo(errorMsg, res, fileServerUrl);
-            }
-        }
-
-        // Check if videoFilePath is a URL or local file
-        // fileServerUrl already declared above
-        const isUrl = videoFilePath && (videoFilePath.startsWith('http://') || videoFilePath.startsWith('https://'));
-        const fileExists = isUrl ? true : (videoFilePath && fs.existsSync(videoFilePath));
-
-        if (!videoFilePath || !fileExists) {
-            // File still not ready after waiting
-            console.log('[USENET] Video file not found after waiting.');
-            console.log('[USENET] Status:', status.status, 'Progress:', status.percentComplete + '%');
-            console.log('[USENET] Searched path:', searchPath);
-
-            return res.status(202).send(
-                `Download in progress: ${status.percentComplete?.toFixed(1) || 0}%. ` +
-                `Video file not yet available from archive. Please try again in a moment.`
-            );
-        }
-
-        console.log('[USENET] Streaming from:', videoFilePath);
-
-        // Check if external file server is configured - if so, skip range checks and redirect immediately
-        const fileServerUrl2 = config.fileServerUrl || process.env.USENET_FILE_SERVER_URL;
-        const usingFileServer = !!fileServerUrl2;
-
-        // Check if videoFilePath is already a URL (from API query)
-        const videoPathIsUrl = videoFilePath && (videoFilePath.startsWith('http://') || videoFilePath.startsWith('https://'));
-
-        // If videoFilePath is already a URL, redirect to Python file server directly
-        if (videoPathIsUrl) {
-            console.log(`[USENET] Redirecting to Python file server: ${videoFilePath}`);
-
-            // Track stream access
-            if (!ACTIVE_USENET_STREAMS.has(nzoId)) {
-                ACTIVE_USENET_STREAMS.set(nzoId, {
-                    videoFilePath: videoFilePath,
-                    downloadPercent: status.percentComplete || 0,
-                    streamCount: 1,
-                    startTime: Date.now(),
-                    lastAccess: Date.now(),
-                    estimatedFileSize: videoFileSize, // File size from API
-                    lastDownloadPercent: status.percentComplete || 0,
-                    config: config, // Store config for monitoring
-                    paused: false,
-                    fileSize: videoFileSize, // File size from API
-                    lastPlaybackPosition: 0
-                });
-            } else {
-                const streamInfo = ACTIVE_USENET_STREAMS.get(nzoId);
-                streamInfo.lastAccess = Date.now();
-                streamInfo.streamCount++;
-                streamInfo.lastDownloadPercent = status.percentComplete || 0;
-            }
-
-            // Add API key for file server authentication
-            const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
-            if (apiKey) {
-                // Append as query parameter for direct streaming support
-                const separator = videoFilePath.includes('?') ? '&' : '?';
-                videoFilePath = `${videoFilePath}${separator}key=${apiKey}`;
-            }
-
-            console.log(`[USENET] Direct stream URL: ${videoFilePath}`);
-            console.log(`[USENET] 🔀 Sending 302 redirect to client - client will connect directly to Python server`);
-
-            // Return 302 redirect to Python file server
-            // Client (VLC/Stremio) will connect directly to Python server
-            return res.redirect(302, videoFilePath);
-        }
-
-        // Check if user is trying to resume from middle (Range request)
-        // Skip this check if using file server - let file server handle ranges
-        const rangeHeader = req.headers.range;
-        if (!usingFileServer && rangeHeader && status.status === 'downloading') {
-            const rangeMatch = rangeHeader.match(/bytes=(\d+)-/);
-            if (rangeMatch) {
-                const requestedByte = parseInt(rangeMatch[1]);
-
-                // Get video file size (either from file if exists, or estimate from download)
-                let videoFileSize = 0;
-                if (fs.existsSync(videoFilePath)) {
-                    videoFileSize = fs.statSync(videoFilePath).size;
-                } else if (status.bytesTotal && status.bytesTotal > 0) {
-                    // Estimate video size (usually slightly smaller than download size due to compression)
-                    videoFileSize = status.bytesTotal * 0.9;
-                }
-
-                if (videoFileSize > 0 && requestedByte > 0) {
-                    const requestedPercent = Math.min((requestedByte / videoFileSize) * 100, 100);
-                    let downloadPercent = status.percentComplete || 0;
-
-                    console.log(`[USENET] User resuming from ${requestedPercent.toFixed(1)}%, download at ${downloadPercent.toFixed(1)}%`);
-
-                    // If user is trying to seek ahead of download, wait for download to catch up
-                    if (requestedPercent > downloadPercent + 5) { // +5% buffer for safety
-                        const targetPercent = Math.min(requestedPercent + 10, 100); // Wait for 10% extra buffer, max 100%
-                        console.log(`[USENET] ⏳ User requesting ${requestedPercent.toFixed(1)}% (byte ${requestedByte}), download at ${downloadPercent.toFixed(1)}%, waiting for ${targetPercent.toFixed(1)}%...`);
-
-                        // Wait in loop until download catches up
-                        const maxWaitTime = 5 * 60 * 1000; // Max 5 minutes
-                        const startWaitTime = Date.now();
-
-                        while (downloadPercent < targetPercent) {
-                            // Check if we've waited too long
-                            if (Date.now() - startWaitTime > maxWaitTime) {
-                                return res.status(408).send(
-                                    `Download not progressing fast enough to reach your playback position.\n\n` +
-                                    `Your position: ${requestedPercent.toFixed(1)}%\n` +
-                                    `Download progress: ${downloadPercent.toFixed(1)}%\n\n` +
-                                    `Please try starting from the beginning or wait for more of the file to download.`
-                                );
-                            }
-
-                            // Wait 2 seconds before checking again
-                            await new Promise(resolve => setTimeout(resolve, 2000));
-
-                            // Refresh download status
-                            status = await SABnzbd.getDownloadStatus(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId);
-                            downloadPercent = status.percentComplete || 0;
-
-                            console.log(`[USENET] ⏳ Waiting for download: ${downloadPercent.toFixed(1)}% / ${targetPercent.toFixed(1)}%`);
-
-                            // Check for download failures
-                            if (status.status === 'error' || status.status === 'failed') {
-                                return res.status(500).send(`Download failed: ${status.error || status.failMessage || 'Unknown error'}`);
-                            }
-
-                            // If download completed, break out and stream
-                            if (status.status === 'completed') {
-                                console.log('[USENET] Download completed while waiting');
-                                break;
-                            }
-                        }
-
-                        console.log(`[USENET] ✓ Download reached ${downloadPercent.toFixed(1)}%, proceeding with stream`);
-                    }
-                }
-            }
-        }
-
-        // Only pause if download is at 99% or higher and has no missing blocks
-        // This prevents pausing too early and ensures repairs can complete
-        let downloadPaused = false;
-        if (status.percentComplete >= 99) {
-            // Check for missing blocks - if any files have missing blocks, don't pause
-            let hasMissingBlocks = false;
-            if (status.files && Array.isArray(status.files)) {
-                for (const file of status.files) {
-                    // SABnzbd files have 'bytes' (downloaded) and 'bytes_left' properties
-                    // If bytes_left > 0, there are still blocks to download
-                    if (file.bytes_left && parseInt(file.bytes_left) > 0) {
-                        hasMissingBlocks = true;
-                        console.log(`[USENET] ⚠️ File "${file.filename}" has ${file.bytes_left} bytes left to download`);
-                        break;
-                    }
-                    // Also check 'mb' and 'mb_left' as SABnzbd uses both
-                    if (file.mb_left && parseFloat(file.mb_left) > 0) {
-                        hasMissingBlocks = true;
-                        console.log(`[USENET] ⚠️ File "${file.filename}" has ${file.mb_left} MB left to download`);
-                        break;
-                    }
-                }
-            }
-
-            if (hasMissingBlocks) {
-                console.log('[USENET] ⚠️ NOT pausing download - missing blocks detected, letting SABnzbd finish for repair');
-            } else {
-                console.log('[USENET] Pausing SABnzbd download to protect streaming files (99%+ complete, no missing blocks)...');
-                await SABnzbd.pauseDownload(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId);
-                downloadPaused = true;
-            }
-        } else {
-            console.log(`[USENET] NOT pausing download yet - only at ${status.percentComplete?.toFixed(1)}%, will pause at 99%`);
-        }
-
-        // Redirect to external file server if configured
-        if (usingFileServer) {
-            // Redirect to external file server instead of streaming through Node.js
-            // Try to make path relative to either downloadDir or incompleteDir
-            let relativePath = videoFilePath;
-
-            // Try downloadDir first (complete directory)
-            if (sabnzbdConfig?.downloadDir && videoFilePath.startsWith(sabnzbdConfig.downloadDir)) {
-                relativePath = videoFilePath.replace(sabnzbdConfig.downloadDir, '').replace(/^\//, '');
-                console.log(`[USENET] File in complete directory, relative path: ${relativePath}`);
-            }
-            // Try incompleteDir if file is there instead
-            else if (sabnzbdConfig?.incompleteDir && videoFilePath.startsWith(sabnzbdConfig.incompleteDir)) {
-                relativePath = videoFilePath.replace(sabnzbdConfig.incompleteDir, '').replace(/^\//, '');
-                console.log(`[USENET] File in incomplete directory, relative path: ${relativePath}`);
-            }
-            // If neither matched, just use the basename or try to extract a relative path
-            else {
-                // Extract just the folder and filename (last 2 path segments)
-                const pathParts = videoFilePath.split('/').filter(p => p);
-                if (pathParts.length >= 2) {
-                    relativePath = pathParts.slice(-2).join('/');
-                } else {
-                    relativePath = pathParts[pathParts.length - 1] || videoFilePath;
-                }
-                console.log(`[USENET] ⚠️ File path not under SABnzbd directories, using extracted path: ${relativePath}`);
-                console.log(`[USENET] Full path: ${videoFilePath}`);
-                console.log(`[USENET] downloadDir: ${sabnzbdConfig?.downloadDir}`);
-                console.log(`[USENET] incompleteDir: ${sabnzbdConfig?.incompleteDir}`);
-            }
-
-            // Encode each path segment separately for proper URL encoding
-            const pathSegments = relativePath.split('/').map(segment => encodeURIComponent(segment));
-            const encodedPath = pathSegments.join('/');
-
-            const externalUrl = `${fileServerUrl.replace(/\/$/, '')}/${encodedPath}`;
-            console.log(`[USENET] Redirecting to external file server: ${externalUrl}`);
-            console.log(`[USENET] File exists check: ${fs.existsSync(videoFilePath)}`);
-
-            // Test connectivity to file server (HEAD request to check if reachable)
-            try {
-                const testUrl = new URL(fileServerUrl);
-                const httpModule = testUrl.protocol === 'https:' ? https : http;
-
-                const testReq = httpModule.request({
-                    hostname: testUrl.hostname,
-                    port: testUrl.port || (testUrl.protocol === 'https:' ? 443 : 80),
-                    path: '/',
-                    method: 'HEAD',
-                    timeout: 2000
-                }, (testRes) => {
-                    console.log(`[USENET] File server is reachable (status: ${testRes.statusCode})`);
-                }).on('error', (err) => {
-                    console.error(`[USENET] ⚠️ WARNING: File server is NOT reachable at ${fileServerUrl}: ${err.message}`);
-                    console.error(`[USENET] Make sure the Python file server is running!`);
-                }).on('timeout', () => {
-                    console.error(`[USENET] ⚠️ WARNING: File server connection timeout at ${fileServerUrl}`);
-                });
-                testReq.end();
-            } catch (err) {
-                console.error(`[USENET] ⚠️ WARNING: Invalid file server URL: ${err.message}`);
-            }
-
-            // Store config globally for auto-clean
-            if (config.fileServerUrl && config.autoCleanOldFiles) {
-                USENET_CONFIGS.set(config.fileServerUrl, config);
-            }
-
-            // Track stream access before redirecting
-            if (!ACTIVE_USENET_STREAMS.has(nzoId)) {
-                const currentFileSize = fs.statSync(videoFilePath).size;
-                const isIncomplete = status.status === 'downloading' && sabnzbdConfig?.incompleteDir && videoFilePath.includes(sabnzbdConfig.incompleteDir);
-
-                // Estimate final file size - use SABnzbd total if downloading, otherwise actual size
-                let estimatedFileSize = currentFileSize;
-                if (isIncomplete && status.percentComplete && status.percentComplete > 0) {
-                    // Estimate based on: currentSize / percentExtracted
-                    // Assume extraction progress roughly matches download progress
-                    const estimateFromProgress = currentFileSize / (status.percentComplete / 100);
-
-                    // Also try using bytesTotal if available
-                    let estimateFromTotal = currentFileSize;
-                    if (status.bytesTotal && status.bytesTotal > currentFileSize) {
-                        estimateFromTotal = status.bytesTotal * 0.9;
-                    }
-
-                    // Use the larger of the two estimates (more conservative)
-                    estimatedFileSize = Math.max(estimateFromProgress, estimateFromTotal, currentFileSize);
-
-                    console.log(`[USENET] File extracting - Current: ${(currentFileSize / 1024 / 1024).toFixed(1)} MB, Progress: ${status.percentComplete.toFixed(1)}%, Estimated final: ${(estimatedFileSize / 1024 / 1024).toFixed(1)} MB (from progress: ${(estimateFromProgress / 1024 / 1024).toFixed(1)} MB, from total: ${(estimateFromTotal / 1024 / 1024).toFixed(1)} MB)`);
-                }
-
-                let initialPosition = 0;
-
-                // Check if user is starting from a specific position (range request)
-                if (req.headers.range) {
-                    const rangeMatch = req.headers.range.match(/bytes=(\d+)-/);
-                    if (rangeMatch) {
-                        initialPosition = parseInt(rangeMatch[1]);
-                        const seekPercent = estimatedFileSize > 0
-                            ? (initialPosition / estimatedFileSize * 100).toFixed(1)
-                            : '?';
-                        console.log(`[USENET] 🎯 User starting at ${seekPercent}% (byte ${initialPosition.toLocaleString()}), download at ${status.percentComplete?.toFixed(1)}%`);
-                    }
-                }
-
-                ACTIVE_USENET_STREAMS.set(nzoId, {
-                    lastAccess: Date.now(),
-                    streamCount: 1,
-                    paused: downloadPaused, // True only if we actually paused SABnzbd
-                    config: {
-                        sabnzbdUrl: config.sabnzbdUrl,
-                        sabnzbdApiKey: config.sabnzbdApiKey
-                    },
-                    videoFilePath: relativePath, // Relative path for deletion
-                    usenetConfig: config, // Full config with cleanup options
-                    fileSize: estimatedFileSize,
-                    lastPlaybackPosition: initialPosition,
-                    lastDownloadPercent: status.percentComplete || 0
-                });
-            } else {
-                const streamInfo = ACTIVE_USENET_STREAMS.get(nzoId);
-                streamInfo.lastAccess = Date.now();
-                streamInfo.streamCount++;
-
-                // Update file size estimate if file is still downloading and we have better info
-                const currentFileSize = fs.statSync(videoFilePath).size;
-                const isIncomplete = status.status === 'downloading' && sabnzbdConfig?.incompleteDir && videoFilePath.includes(sabnzbdConfig.incompleteDir);
-                if (isIncomplete && status.percentComplete && status.percentComplete > 0) {
-                    // Estimate based on current progress
-                    const estimateFromProgress = currentFileSize / (status.percentComplete / 100);
-
-                    let estimateFromTotal = currentFileSize;
-                    if (status.bytesTotal && status.bytesTotal > currentFileSize) {
-                        estimateFromTotal = status.bytesTotal * 0.9;
-                    }
-
-                    const newEstimate = Math.max(estimateFromProgress, estimateFromTotal, currentFileSize, streamInfo.fileSize);
-
-                    // Log extraction progress
-                    const extractedPercent = streamInfo.fileSize > 0 ? (currentFileSize / streamInfo.fileSize * 100) : 0;
-                    console.log(`[USENET] File extraction: ${(currentFileSize / 1024 / 1024).toFixed(1)} MB extracted (${extractedPercent.toFixed(1)}%), download at ${status.percentComplete.toFixed(1)}%, estimated final: ${(newEstimate / 1024 / 1024).toFixed(1)} MB`);
-
-                    streamInfo.fileSize = newEstimate;
-                } else if (!isIncomplete && currentFileSize > streamInfo.fileSize) {
-                    // File finished downloading, use actual size
-                    streamInfo.fileSize = currentFileSize;
-                }
-
-                // Update playback position from range header if present
-                if (req.headers.range) {
-                    const rangeMatch = req.headers.range.match(/bytes=(\d+)-/);
-                    if (rangeMatch) {
-                        const bytePosition = parseInt(rangeMatch[1]);
-                        streamInfo.lastPlaybackPosition = bytePosition;
-
-                        // Log seek position with actual vs estimated size
-                        const seekPercent = streamInfo.fileSize > 0
-                            ? (bytePosition / streamInfo.fileSize * 100).toFixed(1)
-                            : '?';
-
-                        // Check if seeking beyond extracted range (with 5MB safety buffer)
-                        // For MKV files, also check if extraction is far enough for seeking to work
-                        const safetyBuffer = 5 * 1024 * 1024; // 5 MB
-                        const maxSafePosition = Math.max(0, currentFileSize - safetyBuffer);
-
-                        // MKV files need index at end - require at least 80% extraction for reliable seeking
-                        const isMKV = videoFilePath.toLowerCase().endsWith('.mkv');
-                        const extractionPercent = streamInfo.fileSize > 0 ? (currentFileSize / streamInfo.fileSize * 100) : 0;
-                        const mkvSeekThreshold = 80; // Need 80% extracted for MKV seeking
-
-                        if (isMKV && bytePosition > 0 && extractionPercent < mkvSeekThreshold) {
-                            console.log(`[USENET] ⚠️ MKV file only ${extractionPercent.toFixed(1)}% extracted - seeking may not work until ${mkvSeekThreshold}% (MKV index usually at end of file)`);
-                            return res.status(416).send(
-                                `⚠️ Seeking not yet available for this MKV file.\n\n` +
-                                `MKV files store their seeking index at the end of the file.\n` +
-                                `Extraction progress: ${extractionPercent.toFixed(1)}%\n` +
-                                `Seeking available at: ${mkvSeekThreshold}%\n` +
-                                `Download progress: ${status.percentComplete?.toFixed(1)}%\n\n` +
-                                `Please start from the beginning or wait for more extraction.\n` +
-                                `The video will play normally from the start.`
-                            );
-                        }
-
-                        if (bytePosition >= maxSafePosition) {
-                            const extractedPercent = streamInfo.fileSize > 0 ? (currentFileSize / streamInfo.fileSize * 100) : 0;
-                            const targetSize = bytePosition + (10 * 1024 * 1024); // Need 10MB past seek point
-                            const waitMessage = bytePosition >= currentFileSize
-                                ? `Seeking beyond extracted range (${(bytePosition / 1024 / 1024).toFixed(1)} MB requested, only ${(currentFileSize / 1024 / 1024).toFixed(1)} MB extracted)`
-                                : `Seeking too close to extraction edge (${(currentFileSize - bytePosition) / 1024 / 1024} MB buffer)`;
-
-                            console.log(`[USENET] ⚠️ ${waitMessage}. Waiting for extraction to reach ${(targetSize / 1024 / 1024).toFixed(1)} MB...`);
-
-                            // Wait for extraction to catch up
-                            const maxWaitTime = 2 * 60 * 1000; // 2 minutes max
-                            const startWait = Date.now();
-
-                            while (Date.now() - startWait < maxWaitTime) {
-                                await new Promise(resolve => setTimeout(resolve, 2000)); // Check every 2 seconds
-
-                                // Re-check file size
-                                const newFileSize = fs.statSync(videoFilePath).size;
-                                const newStatus = await SABnzbd.getDownloadStatus(
-                                    streamInfo.config.sabnzbdUrl,
-                                    streamInfo.config.sabnzbdApiKey,
-                                    nzoId
-                                );
-
-                                console.log(`[USENET] ⏳ Extraction progress: ${(newFileSize / 1024 / 1024).toFixed(1)} MB (target: ${(targetSize / 1024 / 1024).toFixed(1)} MB), download: ${newStatus.percentComplete?.toFixed(1)}%`);
-
-                                if (newFileSize >= targetSize) {
-                                    console.log(`[USENET] ✓ Extraction caught up! Proceeding with seek to ${seekPercent}%`);
-                                    // Update currentFileSize for the redirect
-                                    streamInfo.fileSize = Math.max(streamInfo.fileSize, newFileSize);
-                                    break;
-                                }
-
-                                // Check if download failed
-                                if (newStatus.status === 'failed' || newStatus.status === 'error') {
-                                    return res.status(500).send(`Download failed: ${newStatus.error || 'Unknown error'}`);
-                                }
-                            }
-
-                            // If we timed out, send error
-                            const finalFileSize = fs.statSync(videoFilePath).size;
-                            if (finalFileSize < targetSize) {
-                                return res.status(416).send(
-                                    `Cannot seek to ${seekPercent}% yet. File extraction is still in progress.\n\n` +
-                                    `Requested position: ${(bytePosition / 1024 / 1024).toFixed(1)} MB\n` +
-                                    `Extracted so far: ${(finalFileSize / 1024 / 1024).toFixed(1)} MB\n` +
-                                    `Download progress: ${status.percentComplete?.toFixed(1)}%\n\n` +
-                                    `Please try seeking to a lower position or wait for more of the file to extract.`
-                                );
-                            }
-                        } else {
-                            console.log(`[USENET] 🎯 User seeking to ${seekPercent}% (byte ${bytePosition.toLocaleString()}), file has ${(currentFileSize / 1024 / 1024).toFixed(1)} MB extracted, download at ${status.percentComplete?.toFixed(1)}%`);
-                        }
-                    }
-                }
-            }
-
-            return res.redirect(302, externalUrl);
-        }
-
-        // Store config globally for auto-clean
-        if (config.fileServerUrl && config.autoCleanOldFiles) {
-            USENET_CONFIGS.set(config.fileServerUrl, config);
-        }
-
-        // Get file stats for direct streaming
-        const stat = fs.statSync(videoFilePath);
-        const isIncomplete = status.status === 'downloading' && sabnzbdConfig?.incompleteDir && videoFilePath.includes(sabnzbdConfig.incompleteDir);
-
-        // Estimate final file size - use SABnzbd total if downloading, otherwise actual size
-        let estimatedFileSize = stat.size;
-        if (isIncomplete && status.percentComplete && status.percentComplete > 0) {
-            // Estimate based on: currentSize / percentExtracted
-            const estimateFromProgress = stat.size / (status.percentComplete / 100);
-
-            // Also try using bytesTotal if available
-            let estimateFromTotal = stat.size;
-            if (status.bytesTotal && status.bytesTotal > stat.size) {
-                estimateFromTotal = status.bytesTotal * 0.9;
-            }
-
-            // Use the larger of the two estimates (more conservative)
-            estimatedFileSize = Math.max(estimateFromProgress, estimateFromTotal, stat.size);
-
-            console.log(`[USENET] File extracting - Current: ${(stat.size / 1024 / 1024).toFixed(1)} MB, Progress: ${status.percentComplete.toFixed(1)}%, Estimated final: ${(estimatedFileSize / 1024 / 1024).toFixed(1)} MB (from progress: ${(estimateFromProgress / 1024 / 1024).toFixed(1)} MB, from total: ${(estimateFromTotal / 1024 / 1024).toFixed(1)} MB)`);
-        }
-
-        // Track this stream access
-        if (!ACTIVE_USENET_STREAMS.has(nzoId)) {
-            let initialPosition = 0;
-
-            // Check if user is starting from a specific position (range request)
-            if (req.headers.range) {
-                const rangeMatch = req.headers.range.match(/bytes=(\d+)-/);
-                if (rangeMatch) {
-                    initialPosition = parseInt(rangeMatch[1]);
-                    const seekPercent = estimatedFileSize > 0
-                        ? (initialPosition / estimatedFileSize * 100).toFixed(1)
-                        : '?';
-                    console.log(`[USENET] 🎯 User starting at ${seekPercent}% (byte ${initialPosition.toLocaleString()}), download at ${status.percentComplete?.toFixed(1)}%`);
-                }
-            }
-
-            ACTIVE_USENET_STREAMS.set(nzoId, {
-                lastAccess: Date.now(),
-                streamCount: 1,
-                paused: downloadPaused, // True only if we actually paused SABnzbd
-                config: {
-                    sabnzbdUrl: config.sabnzbdUrl,
-                    sabnzbdApiKey: config.sabnzbdApiKey
-                },
-                videoFilePath: null, // No file server, so no path needed for cleanup
-                usenetConfig: config, // Full config with cleanup options
-                fileSize: estimatedFileSize,
-                lastPlaybackPosition: initialPosition,
-                lastDownloadPercent: status.percentComplete || 0
-            });
-        } else {
-            const streamInfo = ACTIVE_USENET_STREAMS.get(nzoId);
-            streamInfo.lastAccess = Date.now();
-            streamInfo.streamCount++;
-
-            // Update file size estimate if file is still extracting and we have better info
-            if (isBeingExtracted && status.percentComplete && status.percentComplete > 0) {
-                // Estimate based on current progress
-                const estimateFromProgress = stat.size / (status.percentComplete / 100);
-
-                let estimateFromTotal = stat.size;
-                if (status.bytesTotal && status.bytesTotal > stat.size) {
-                    estimateFromTotal = status.bytesTotal * 0.9;
-                }
-
-                const newEstimate = Math.max(estimateFromProgress, estimateFromTotal, stat.size, streamInfo.fileSize);
-
-                // Log extraction progress
-                const extractedPercent = streamInfo.fileSize > 0 ? (stat.size / streamInfo.fileSize * 100) : 0;
-                console.log(`[USENET] File extraction: ${(stat.size / 1024 / 1024).toFixed(1)} MB extracted (${extractedPercent.toFixed(1)}%), download at ${status.percentComplete.toFixed(1)}%, estimated final: ${(newEstimate / 1024 / 1024).toFixed(1)} MB`);
-
-                streamInfo.fileSize = newEstimate;
-            } else if (!isBeingExtracted && stat.size > streamInfo.fileSize) {
-                // File finished extracting, use actual size
-                streamInfo.fileSize = stat.size;
-            }
-
-            // Update playback position from range header if present
-            if (req.headers.range) {
-                const rangeMatch = req.headers.range.match(/bytes=(\d+)-/);
-                if (rangeMatch) {
-                    const bytePosition = parseInt(rangeMatch[1]);
-                    streamInfo.lastPlaybackPosition = bytePosition;
-
-                    // Log seek position with actual vs estimated size
-                    const seekPercent = streamInfo.fileSize > 0
-                        ? (bytePosition / streamInfo.fileSize * 100).toFixed(1)
-                        : '?';
-
-                    // Check if seeking beyond extracted range (with 5MB safety buffer)
-                    // For MKV files, also check if extraction is far enough for seeking to work
-                    const safetyBuffer = 5 * 1024 * 1024; // 5 MB
-                    const maxSafePosition = Math.max(0, stat.size - safetyBuffer);
-
-                    // MKV files need index at end - require at least 80% extraction for reliable seeking
-                    const isMKV = videoFilePath.toLowerCase().endsWith('.mkv');
-                    const extractionPercent = streamInfo.fileSize > 0 ? (stat.size / streamInfo.fileSize * 100) : 0;
-                    const mkvSeekThreshold = 80; // Need 80% extracted for MKV seeking
-
-                    if (isMKV && bytePosition > 0 && extractionPercent < mkvSeekThreshold) {
-                        console.log(`[USENET] ⚠️ MKV file only ${extractionPercent.toFixed(1)}% extracted - seeking may not work until ${mkvSeekThreshold}% (MKV index usually at end of file)`);
-                        return res.status(416).send(
-                            `⚠️ Seeking not yet available for this MKV file.\n\n` +
-                            `MKV files store their seeking index at the end of the file.\n` +
-                            `Extraction progress: ${extractionPercent.toFixed(1)}%\n` +
-                            `Seeking available at: ${mkvSeekThreshold}%\n` +
-                            `Download progress: ${status.percentComplete?.toFixed(1)}%\n\n` +
-                            `Please start from the beginning or wait for more extraction.\n` +
-                            `The video will play normally from the start.`
-                        );
-                    }
-
-                    if (isBeingExtracted && bytePosition >= maxSafePosition) {
-                        const extractedPercent = streamInfo.fileSize > 0 ? (stat.size / streamInfo.fileSize * 100) : 0;
-                        const targetSize = bytePosition + (10 * 1024 * 1024); // Need 10MB past seek point
-                        const waitMessage = bytePosition >= stat.size
-                            ? `Seeking beyond extracted range (${(bytePosition / 1024 / 1024).toFixed(1)} MB requested, only ${(stat.size / 1024 / 1024).toFixed(1)} MB extracted)`
-                            : `Seeking too close to extraction edge (${(stat.size - bytePosition) / 1024 / 1024} MB buffer)`;
-
-                        console.log(`[USENET] ⚠️ ${waitMessage}. Waiting for extraction to reach ${(targetSize / 1024 / 1024).toFixed(1)} MB...`);
-
-                        // Wait for extraction to catch up
-                        const maxWaitTime = 2 * 60 * 1000; // 2 minutes max
-                        const startWait = Date.now();
-
-                        while (Date.now() - startWait < maxWaitTime) {
-                            await new Promise(resolve => setTimeout(resolve, 2000)); // Check every 2 seconds
-
-                            // Re-check file size
-                            const newFileStat = fs.statSync(videoFilePath);
-                            const newStatus = await SABnzbd.getDownloadStatus(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId);
-
-                            console.log(`[USENET] ⏳ Extraction progress: ${(newFileStat.size / 1024 / 1024).toFixed(1)} MB (target: ${(targetSize / 1024 / 1024).toFixed(1)} MB), download: ${newStatus.percentComplete?.toFixed(1)}%`);
-
-                            if (newFileStat.size >= targetSize) {
-                                console.log(`[USENET] ✓ Extraction caught up! Proceeding with seek to ${seekPercent}%`);
-                                // Update for streaming
-                                streamInfo.fileSize = Math.max(streamInfo.fileSize, newFileStat.size);
-                                break;
-                            }
-
-                            // Check if download failed
-                            if (newStatus.status === 'failed' || newStatus.status === 'error') {
-                                return res.status(500).send(`Download failed: ${newStatus.error || 'Unknown error'}`);
-                            }
-                        }
-
-                        // If we timed out, send error
-                        const finalFileStat = fs.statSync(videoFilePath);
-                        if (finalFileStat.size < targetSize) {
-                            return res.status(416).send(
-                                `Cannot seek to ${seekPercent}% yet. File extraction is still in progress.\n\n` +
-                                `Requested position: ${(bytePosition / 1024 / 1024).toFixed(1)} MB\n` +
-                                `Extracted so far: ${(finalFileStat.size / 1024 / 1024).toFixed(1)} MB\n` +
-                                `Download progress: ${status.percentComplete?.toFixed(1)}%\n\n` +
-                                `Please try seeking to a lower position or wait for more of the file to extract.`
-                            );
-                        }
-                    } else {
-                        console.log(`[USENET] 🎯 User seeking to ${seekPercent}% (byte ${bytePosition.toLocaleString()}), file has ${(stat.size / 1024 / 1024).toFixed(1)} MB extracted, download at ${status.percentComplete?.toFixed(1)}%`);
-                    }
-                }
-            }
-        }
-
-        // Handle range requests for seeking
-        const range = req.headers.range;
-        let fileSize = estimatedFileSize;
-
-        console.log(`[USENET] File info - Size: ${(fileSize / 1024 / 1024).toFixed(2)} MB, Being extracted: ${isBeingExtracted}`);
-
-        if (range) {
-            const parts = range.replace(/bytes=/, '').split('-');
-            const start = parseInt(parts[0], 10);
-            let end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
-
-            // Clamp end to actual file size on disk
-            end = Math.min(end, stat.size - 1);
-
-            console.log(`[USENET] Range request: ${start}-${end}, File size: ${stat.size}`);
-
-            // Check if requested range is beyond what's available
-            if (start >= stat.size) {
-                // Range not yet available - wait for it if file is still being extracted
-                if (isBeingExtracted || status.status === 'downloading') {
-                    console.log(`[USENET] Range ${start}-${end} not yet available, file size: ${stat.size} bytes`);
-
-                    // Wait up to 60 seconds for the file to grow
-                    const maxWait = 60000;
-                    const startWait = Date.now();
-                    const pollInterval = 2000;
-
-                    while (Date.now() - startWait < maxWait) {
-                        await new Promise(resolve => setTimeout(resolve, pollInterval));
-
-                        // Re-check file size again
-                        const newStat = fs.statSync(videoFilePath);
-                        console.log(`[USENET] Waiting for file to grow... Current size: ${(newStat.size / 1024 / 1024).toFixed(2)} MB`);
-
-                        if (start < newStat.size) {
-                            // Range is now available
-                            const newEnd = Math.min(end, newStat.size - 1);
-                            const chunksize = (newEnd - start) + 1;
-                            const file = fs.createReadStream(videoFilePath, { start, end: newEnd });
-
-                            const headers = {
-                                'Content-Range': `bytes ${start}-${newEnd}/${newStat.size}`,
-                                'Accept-Ranges': 'bytes',
-                                'Content-Length': chunksize,
-                                'Content-Type': 'video/mp4',
-                                'Cache-Control': 'no-cache',
-                            };
-
-                            console.log(`[USENET] Range now available: ${start}-${newEnd}/${newStat.size}`);
-                            res.writeHead(206, headers);
-                            return file.pipe(res);
-                        }
-                    }
-
-                    // Timeout waiting
-                    return res.status(416).send(
-                        `Requested position not yet available. ` +
-                        `File is still being extracted. Please try again in a moment.`
-                    );
-                } else {
-                    return res.status(416).send('Requested range not available.');
-                }
-            }
-
-            const chunksize = (end - start) + 1;
-            const file = fs.createReadStream(videoFilePath, { start, end });
-
-            const headers = {
-                'Content-Range': `bytes ${start}-${end}/${stat.size}`,
-                'Accept-Ranges': 'bytes',
-                'Content-Length': chunksize,
-                'Content-Type': 'video/mp4',
-                'Cache-Control': 'no-cache',
-            };
-
-            res.writeHead(206, headers);
-            file.pipe(res);
-
-            // Log seek operation
-            if (start > 0) {
-                console.log(`[USENET] Serving range: ${start}-${end}/${stat.size} (${(start / stat.size * 100).toFixed(1)}% into file)`);
-            }
-        } else {
-            // No range, stream from beginning
-            const headers = {
-                'Content-Length': stat.size,
-                'Content-Type': 'video/mp4',
-                'Accept-Ranges': 'bytes',
-                'Cache-Control': 'no-cache',
-            };
-
-            console.log(`[USENET] Streaming from beginning, file size: ${(stat.size / 1024 / 1024).toFixed(2)} MB`);
-            res.writeHead(200, headers);
-            fs.createReadStream(videoFilePath).pipe(res);
-        }
-
-        // Monitor download progress in background
-        if (status.status === 'downloading') {
-            console.log(`[USENET] Streaming while downloading: ${status.percentComplete?.toFixed(1)}% complete`);
-        }
+        // Immediately redirect to universal endpoint which will handle file resolution dynamically
+        // This allows streaming to start as soon as the file is available, and continues
+        // working even when SABnzbd moves files from incomplete/ to complete/
+        console.log('[USENET] Redirecting to universal streaming endpoint...');
+
+        const encodedTitle = encodeURIComponent(decodedTitle);
+        const configParam = encodeURIComponent(configJson);
+        const universalUrl = `/usenet/universal/${encodedTitle}/${type}/${id}?config=${configParam}`;
+
+        console.log(`[USENET] ✓ Stream URL: ${universalUrl}`);
+        return res.redirect(307, universalUrl);
 
     } catch (error) {
         console.error('[USENET] Streaming error:', error.message);
