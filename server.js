@@ -1530,7 +1530,9 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
 
         // Proxy to file server
         const fileServerUrl = config.fileServerUrl.replace(/\/$/, '');
-        const proxyUrl = `${fileServerUrl}/${fileInfo.path}`;
+        // Encode the path to handle special characters (like archive:// prefix)
+        const encodedPath = fileInfo.path.split('/').map(encodeURIComponent).join('/');
+        const proxyUrl = `${fileServerUrl}/${encodedPath}`;
         console.log(`[USENET-UNIVERSAL] Proxying to: ${proxyUrl}`);
 
         const axios = (await import('axios')).default;
