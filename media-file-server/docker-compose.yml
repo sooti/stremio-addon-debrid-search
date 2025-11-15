@@ -15,6 +15,11 @@ services:
       - "3003:3003"
     environment:
       - API_KEY=${USENET_API_KEY:-}
+      - SABNZBD_URL=${SABNZBD_URL:-http://host.docker.internal:8080}
+      - SABNZBD_API_KEY=${SABNZBD_API_KEY:-}
+      - MIN_DOWNLOAD_PERCENT=${MIN_DOWNLOAD_PERCENT:-80.0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Allow access to SABnzbd on host
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |

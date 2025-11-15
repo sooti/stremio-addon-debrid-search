@@ -21,5 +21,8 @@ rarfile==4.2  # RAR archive support
 py7zr==0.22.0  # 7z archive support
 # zipfile is built into Python standard library
 
+# HTTP client for SABnzbd API integration
+requests==2.32.3
+
 # System utilities (already in Docker)
 # ffmpeg - for error video generation

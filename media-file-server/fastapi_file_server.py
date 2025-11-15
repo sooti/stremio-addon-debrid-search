@@ -103,6 +103,11 @@ class Config:
     def SABNZBD_API_KEY(self) -> Optional[str]:
         return os.environ.get('SABNZBD_API_KEY')
 
+    @property
+    def MIN_DOWNLOAD_PERCENT(self) -> float:
+        """Minimum download percentage required before allowing archive extraction"""
+        return float(os.environ.get('MIN_DOWNLOAD_PERCENT', '80.0'))
+
     VIDEO_EXTENSIONS = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.3gp', '.ogv', '.ts', '.m2ts']
 
 config = Config()
@@ -887,6 +892,40 @@ async def stream_from_archive(file_path: str, range_header: Optional[str] = None
             logger.error(f"Archive not found: {archive_path}")
             raise HTTPException(status_code=404, detail=f"Archive not found: {archive_rel_path}")
 
+        # Check SABnzbd status before attempting extraction
+        folder_name = os.path.basename(os.path.dirname(archive_path))
+        sabnzbd_status = get_sabnzbd_status(folder_name)
+
+        if sabnzbd_status:
+            percent = sabnzbd_status.get('percent_complete', 0)
+            status = sabnzbd_status.get('status', 'unknown')
+
+            logger.info(f"SABnzbd status for '{folder_name}': {status} ({percent:.1f}% complete)")
+
+            # If still downloading and below threshold, return error video
+            if status == 'downloading' and percent < config.MIN_DOWNLOAD_PERCENT:
+                error_msg = f"Download in progress: {percent:.1f}% complete. Please wait until {config.MIN_DOWNLOAD_PERCENT:.0f}% for streaming."
+                logger.warning(error_msg)
+
+                try:
+                    error_video_path = await generate_error_video(error_msg)
+                    return FileResponse(
+                        error_video_path,
+                        media_type="video/mp4",
+                        headers={
+                            "Accept-Ranges": "bytes",
+                            "Cache-Control": "no-cache",
+                            "Refresh": "10"  # Suggest client retry in 10 seconds
+                        }
+                    )
+                except Exception as video_error:
+                    logger.error(f"Failed to generate error video: {video_error}")
+                    raise HTTPException(status_code=503, detail=error_msg)
+
+        # If file is in incomplete directory but SABnzbd status unavailable, warn
+        if 'incomplete' in archive_rel_path.lower() and not sabnzbd_status:
+            logger.warning(f"Extracting from incomplete directory without SABnzbd status - extraction may fail")
+
         logger.info(f"Extracting from archive: {archive_path}")
         logger.info(f"Internal file: {internal_file}")
 
@@ -1083,6 +1122,11 @@ async def startup_event():
     logger.info(f"🔀 rar2fs mount: {config.RAR2FS_MOUNT}")
     logger.info(f"🔒 API authentication: {'Enabled' if config.API_KEY else 'Disabled'}")
     logger.info(f"📹 Error video cache: {config.ERROR_VIDEO_CACHE_DIR}")
+
+    if config.SABNZBD_API_KEY:
+        logger.info(f"📥 SABnzbd integration: Enabled (min {config.MIN_DOWNLOAD_PERCENT:.0f}% for streaming)")
+    else:
+        logger.info(f"📥 SABnzbd integration: Disabled (no API key)")
 
     # Ensure error video cache directory exists
     os.makedirs(config.ERROR_VIDEO_CACHE_DIR, exist_ok=True)
