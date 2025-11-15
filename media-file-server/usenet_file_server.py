@@ -57,6 +57,64 @@ def is_archive(filepath):
     return False
 
 
+def is_first_archive_volume(filepath):
+    """Check if a file is the first volume of a multi-part archive
+
+    For RAR archives:
+    - .rar is the first volume (modern RAR or single-volume)
+    - .r00, .r01, etc. are continuation volumes (should skip)
+    - .part1.rar or .part01.rar or .part001.rar is first volume
+    - .part2.rar, .part02.rar, etc. are continuation volumes (should skip)
+
+    For 7z archives:
+    - .7z is the first volume (or single volume)
+    - .7z.001 is the first volume of a split archive
+    - .7z.002, .7z.003, etc. are continuation volumes (should skip)
+
+    For ZIP archives:
+    - .zip files are typically single volume (always process)
+
+    Returns: True if this is a first volume or single-volume archive
+    """
+    if not os.path.isfile(filepath):
+        return False
+
+    lower = filepath.lower()
+
+    # ZIP files are always processed (typically single volume)
+    if lower.endswith('.zip'):
+        return True
+
+    # RAR archives
+    if RARFILE_AVAILABLE:
+        # .rar files are first volume
+        if lower.endswith('.rar'):
+            # But NOT if it's .partN.rar where N > 1
+            part_match = re.search(r'\.part0*(\d+)\.rar$', lower)
+            if part_match:
+                part_num = int(part_match.group(1))
+                return part_num == 1
+            return True
+
+        # .rXX files are continuation volumes - skip them
+        if re.match(r'.*\.r\d+$', lower):
+            return False
+
+    # 7z archives
+    if PY7ZR_AVAILABLE:
+        # .7z files are first volume
+        if lower.endswith('.7z'):
+            return True
+
+        # .7z.001 is first volume, .7z.002+ are continuation volumes
+        split_match = re.match(r'.*\.7z\.(\d+)$', lower)
+        if split_match:
+            volume_num = int(split_match.group(1))
+            return volume_num == 1
+
+    return False
+
+
 def list_archive_contents(archive_path):
     """List all files in an archive with their sizes
     Returns: list of dicts with 'name', 'size', 'is_dir' keys
@@ -75,6 +133,13 @@ def list_archive_contents(archive_path):
                     })
 
         elif RARFILE_AVAILABLE and (lower.endswith('.rar') or re.match(r'.*\.(r\d+|part\d+\.rar)$', lower)):
+            # Check if this is a first volume before attempting to open
+            if not is_first_archive_volume(archive_path):
+                # This is a continuation volume - should not be processed directly
+                basename = os.path.basename(archive_path)
+                print(f"[ARCHIVE] Skipping continuation volume (should only process first volume): {basename}")
+                return []
+
             with rarfile.RarFile(archive_path) as rf:
                 for info in rf.infolist():
                     files.append({
@@ -84,6 +149,12 @@ def list_archive_contents(archive_path):
                     })
 
         elif PY7ZR_AVAILABLE and (lower.endswith('.7z') or re.match(r'.*\.7z\.\d+$', lower)):
+            # Check if this is a first volume before attempting to open
+            if not is_first_archive_volume(archive_path):
+                basename = os.path.basename(archive_path)
+                print(f"[ARCHIVE] Skipping continuation volume (should only process first volume): {basename}")
+                return []
+
             with py7zr.SevenZipFile(archive_path, 'r') as archive:
                 for name, info in archive.list():
                     files.append({
@@ -92,8 +163,22 @@ def list_archive_contents(archive_path):
                         'is_dir': info.is_directory if hasattr(info, 'is_directory') else False
                     })
 
+    except FileNotFoundError:
+        print(f"[ARCHIVE] File not found: {archive_path}")
+        return []
+    except PermissionError:
+        print(f"[ARCHIVE] Permission denied: {archive_path}")
+        return []
     except Exception as e:
-        print(f"[ARCHIVE] Error listing {archive_path}: {e}")
+        error_msg = str(e).lower()
+        # Check for common multi-volume errors
+        if 'need to start from first volume' in error_msg or 'first volume' in error_msg:
+            basename = os.path.basename(archive_path)
+            print(f"[ARCHIVE] Skipping non-first volume: {basename}")
+        elif 'corrupt' in error_msg or 'damaged' in error_msg:
+            print(f"[ARCHIVE] Corrupt or incomplete archive: {os.path.basename(archive_path)}")
+        else:
+            print(f"[ARCHIVE] Error listing {os.path.basename(archive_path)}: {e}")
         return []
 
     return files
@@ -115,6 +200,10 @@ def extract_file_from_archive(archive_path, file_in_archive, start_byte=0, end_b
                 return data
 
         elif RARFILE_AVAILABLE and (lower.endswith('.rar') or re.match(r'.*\.(r\d+|part\d+\.rar)$', lower)):
+            # Ensure we're using the first volume
+            if not is_first_archive_volume(archive_path):
+                print(f"[ARCHIVE] Warning: trying to extract from non-first volume, this may fail")
+
             with rarfile.RarFile(archive_path) as rf:
                 data = rf.read(file_in_archive)
                 if start_byte or end_byte:
@@ -123,6 +212,10 @@ def extract_file_from_archive(archive_path, file_in_archive, start_byte=0, end_b
                 return data
 
         elif PY7ZR_AVAILABLE and (lower.endswith('.7z') or re.match(r'.*\.7z\.\d+$', lower)):
+            # Ensure we're using the first volume
+            if not is_first_archive_volume(archive_path):
+                print(f"[ARCHIVE] Warning: trying to extract from non-first volume, this may fail")
+
             with py7zr.SevenZipFile(archive_path, 'r') as archive:
                 extracted = archive.read([file_in_archive])
                 if file_in_archive in extracted:
@@ -135,20 +228,37 @@ def extract_file_from_archive(archive_path, file_in_archive, start_byte=0, end_b
         print(f"[ARCHIVE] Unsupported archive type: {archive_path}")
         return None
 
+    except FileNotFoundError:
+        print(f"[ARCHIVE] Archive file not found: {archive_path}")
+        return None
+    except KeyError:
+        print(f"[ARCHIVE] File '{file_in_archive}' not found in archive: {os.path.basename(archive_path)}")
+        return None
+    except PermissionError:
+        print(f"[ARCHIVE] Permission denied accessing: {archive_path}")
+        return None
     except Exception as e:
-        print(f"[ARCHIVE] Error extracting {file_in_archive} from {archive_path}: {e}")
+        error_msg = str(e).lower()
+        if 'need to start from first volume' in error_msg or 'first volume' in error_msg:
+            print(f"[ARCHIVE] Error: Non-first volume used for extraction: {os.path.basename(archive_path)}")
+        elif 'corrupt' in error_msg or 'damaged' in error_msg:
+            print(f"[ARCHIVE] Corrupt or incomplete archive: {os.path.basename(archive_path)}")
+        else:
+            print(f"[ARCHIVE] Error extracting {file_in_archive} from {os.path.basename(archive_path)}: {e}")
         return None
 
 
 def find_archives_in_directory(directory):
     """Find all archive files in a directory (non-recursive)
+    Only returns first volumes of multi-part archives to avoid duplicate processing
     Returns: list of archive file paths
     """
     archives = []
     try:
         for item in os.listdir(directory):
             item_path = os.path.join(directory, item)
-            if is_archive(item_path):
+            # Only include first volumes to avoid "Need to start from first volume" errors
+            if is_archive(item_path) and is_first_archive_volume(item_path):
                 archives.append(item_path)
     except Exception as e:
         print(f"[ARCHIVE] Error scanning directory {directory}: {e}")
