@@ -106,7 +106,7 @@ class Config:
     @property
     def MIN_DOWNLOAD_PERCENT(self) -> float:
         """Minimum download percentage required before allowing archive extraction"""
-        return float(os.environ.get('MIN_DOWNLOAD_PERCENT', '80.0'))
+        return float(os.environ.get('MIN_DOWNLOAD_PERCENT', '30.0'))
 
     VIDEO_EXTENSIONS = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.3gp', '.ogv', '.ts', '.m2ts']
 
