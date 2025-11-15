@@ -95,9 +95,100 @@ class Config:
     def SOURCE_DIR(self) -> str:
         return os.environ.get('FASTAPI_SOURCE_DIR', '')
 
+    @property
+    def SABNZBD_URL(self) -> Optional[str]:
+        return os.environ.get('SABNZBD_URL', 'http://localhost:8080')
+
+    @property
+    def SABNZBD_API_KEY(self) -> Optional[str]:
+        return os.environ.get('SABNZBD_API_KEY')
+
     VIDEO_EXTENSIONS = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.3gp', '.ogv', '.ts', '.m2ts']
 
 config = Config()
+
+# SABnzbd API Helper Functions
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+    logger.warning("requests library not available - SABnzbd integration disabled")
+
+
+def get_sabnzbd_status(folder_name: str) -> Optional[Dict[str, Any]]:
+    """Query SABnzbd to get download status for a folder
+
+    Args:
+        folder_name: The folder name to search for in SABnzbd queue/history
+
+    Returns:
+        Dict with status info including percent_complete, or None if not found/error
+    """
+    if not REQUESTS_AVAILABLE or not config.SABNZBD_API_KEY:
+        return None
+
+    try:
+        # Check queue first
+        params = {
+            'mode': 'queue',
+            'output': 'json',
+            'apikey': config.SABNZBD_API_KEY
+        }
+
+        response = requests.get(
+            f"{config.SABNZBD_URL}/api",
+            params=params,
+            timeout=5
+        )
+
+        if response.ok:
+            data = response.json()
+            queue = data.get('queue', {})
+            slots = queue.get('slots', [])
+
+            # Search for matching folder/filename
+            for slot in slots:
+                filename = slot.get('filename', '')
+                if folder_name in filename or filename in folder_name:
+                    percent = float(slot.get('percentage', 0))
+                    status = slot.get('status', 'Unknown')
+
+                    return {
+                        'status': 'downloading' if status.lower() != 'paused' else 'paused',
+                        'percent_complete': percent,
+                        'nzo_id': slot.get('nzo_id'),
+                        'bytes_downloaded': float(slot.get('mb', 0)) * 1024 * 1024,
+                        'bytes_total': float(slot.get('size', 0)) * 1024 * 1024,
+                        'incomplete_path': slot.get('storage')
+                    }
+
+        # Not in queue, check history
+        params['mode'] = 'history'
+        response = requests.get(
+            f"{config.SABNZBD_URL}/api",
+            params=params,
+            timeout=5
+        )
+
+        if response.ok:
+            data = response.json()
+            history = data.get('history', {})
+            slots = history.get('slots', [])
+
+            for slot in slots:
+                name = slot.get('name', '')
+                if folder_name in name or name in folder_name:
+                    return {
+                        'status': 'completed' if slot.get('status') == 'Completed' else 'failed',
+                        'percent_complete': 100.0,
+                        'path': slot.get('storage')
+                    }
+
+    except Exception as e:
+        logger.debug(f"Error querying SABnzbd for {folder_name}: {e}")
+
+    return None
 
 
 # === Archive Handling Functions ===
@@ -239,8 +330,24 @@ def list_archive_contents(archive_path: str) -> List[Dict[str, Any]]:
 
 
 def extract_file_from_archive(archive_path: str, file_in_archive: str, start_byte: int = 0, end_byte: Optional[int] = None) -> bytes:
-    """Extract a specific file from an archive, optionally with byte range"""
+    """Extract a specific file from an archive, optionally with byte range
+
+    Supports progressive extraction for incomplete archives by checking SABnzbd download status.
+    """
     lower = archive_path.lower()
+
+    # Check SABnzbd status for progressive extraction
+    folder_name = os.path.basename(os.path.dirname(archive_path))
+    sabnzbd_status = get_sabnzbd_status(folder_name)
+
+    if sabnzbd_status:
+        percent = sabnzbd_status.get('percent_complete', 0)
+        status = sabnzbd_status.get('status', 'unknown')
+        logger.info(f"SABnzbd status for '{folder_name}': {status} ({percent:.1f}% complete)")
+
+        # If download is still in progress and very incomplete, warn user
+        if status == 'downloading' and percent < 10:
+            logger.warning(f"Archive is only {percent:.1f}% downloaded - extraction may fail")
 
     try:
         # Extract full file first
@@ -288,7 +395,24 @@ def extract_file_from_archive(archive_path: str, file_in_archive: str, start_byt
         raise
     except Exception as e:
         error_msg = str(e).lower()
-        if 'need to start from first volume' in error_msg or 'first volume' in error_msg:
+
+        # Check for incomplete archive errors
+        if 'failed to read enough data' in error_msg or 'failed the read enough data' in error_msg:
+            if sabnzbd_status:
+                percent = sabnzbd_status.get('percent_complete', 0)
+                status = sabnzbd_status.get('status', 'unknown')
+                logger.warning(f"Archive incomplete - download is {percent:.1f}% complete (status: {status})")
+
+                # If download is in progress, provide helpful error
+                if status == 'downloading':
+                    raise Exception(f"Archive is still downloading ({percent:.1f}% complete). Please wait for download to complete.")
+                else:
+                    raise Exception(f"Archive appears incomplete (download {percent:.1f}% complete, status: {status})")
+            else:
+                logger.error(f"Archive appears incomplete but no SABnzbd status available: {os.path.basename(archive_path)}")
+                raise Exception("Archive is incomplete or corrupted - insufficient data available")
+
+        elif 'need to start from first volume' in error_msg or 'first volume' in error_msg:
             logger.error(f"Error: Non-first volume used for extraction: {os.path.basename(archive_path)}")
         elif 'corrupt' in error_msg or 'damaged' in error_msg:
             logger.error(f"Corrupt or incomplete archive: {os.path.basename(archive_path)}")
@@ -835,8 +959,28 @@ async def stream_from_archive(file_path: str, range_header: Optional[str] = None
             return Response(content=data, status_code=206, headers=headers, media_type="application/octet-stream")
 
         except Exception as e:
+            error_str = str(e)
             logger.error(f"Error extracting file: {e}")
-            raise HTTPException(status_code=500, detail=f"Error extracting file: {str(e)}")
+
+            # Check if this is an incomplete download error
+            if 'still downloading' in error_str.lower() or 'incomplete' in error_str.lower():
+                # Return an error video instead of failing
+                logger.info("Returning error video for incomplete download")
+                try:
+                    error_video_path = await generate_error_video(error_str)
+                    return FileResponse(
+                        error_video_path,
+                        media_type="video/mp4",
+                        headers={
+                            "Accept-Ranges": "bytes",
+                            "Cache-Control": "no-cache"
+                        }
+                    )
+                except Exception as video_error:
+                    logger.error(f"Failed to generate error video: {video_error}")
+                    raise HTTPException(status_code=503, detail=error_str)
+
+            raise HTTPException(status_code=500, detail=f"Error extracting file: {error_str}")
 
     except HTTPException:
         raise

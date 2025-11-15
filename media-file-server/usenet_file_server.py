@@ -40,6 +40,97 @@ except ImportError:
     PY7ZR_AVAILABLE = False
     print("[WARNING] py7zr not available - 7z support disabled")
 
+# SABnzbd API integration
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+    print("[WARNING] requests library not available - SABnzbd integration disabled")
+
+
+# ========== Configuration ==========
+
+SABNZBD_URL = os.environ.get('SABNZBD_URL', 'http://localhost:8080')
+SABNZBD_API_KEY = os.environ.get('SABNZBD_API_KEY')
+
+
+# ========== SABnzbd Helper Functions ==========
+
+def get_sabnzbd_status(folder_name):
+    """Query SABnzbd to get download status for a folder
+
+    Args:
+        folder_name: The folder name to search for in SABnzbd queue/history
+
+    Returns:
+        Dict with status info including percent_complete, or None if not found/error
+    """
+    if not REQUESTS_AVAILABLE or not SABNZBD_API_KEY:
+        return None
+
+    try:
+        # Check queue first
+        params = {
+            'mode': 'queue',
+            'output': 'json',
+            'apikey': SABNZBD_API_KEY
+        }
+
+        response = requests.get(
+            f"{SABNZBD_URL}/api",
+            params=params,
+            timeout=5
+        )
+
+        if response.ok:
+            data = response.json()
+            queue = data.get('queue', {})
+            slots = queue.get('slots', [])
+
+            # Search for matching folder/filename
+            for slot in slots:
+                filename = slot.get('filename', '')
+                if folder_name in filename or filename in folder_name:
+                    percent = float(slot.get('percentage', 0))
+                    status = slot.get('status', 'Unknown')
+
+                    return {
+                        'status': 'downloading' if status.lower() != 'paused' else 'paused',
+                        'percent_complete': percent,
+                        'nzo_id': slot.get('nzo_id'),
+                        'bytes_downloaded': float(slot.get('mb', 0)) * 1024 * 1024,
+                        'bytes_total': float(slot.get('size', 0)) * 1024 * 1024,
+                        'incomplete_path': slot.get('storage')
+                    }
+
+        # Not in queue, check history
+        params['mode'] = 'history'
+        response = requests.get(
+            f"{SABNZBD_URL}/api",
+            params=params,
+            timeout=5
+        )
+
+        if response.ok:
+            data = response.json()
+            history = data.get('history', {})
+            slots = history.get('slots', [])
+
+            for slot in slots:
+                name = slot.get('name', '')
+                if folder_name in name or name in folder_name:
+                    return {
+                        'status': 'completed' if slot.get('status') == 'Completed' else 'failed',
+                        'percent_complete': 100.0,
+                        'path': slot.get('storage')
+                    }
+
+    except Exception as e:
+        print(f"[SABNZBD] Error querying SABnzbd for {folder_name}: {e}")
+
+    return None
+
 
 # ========== Archive Handling Functions ==========
 
@@ -186,9 +277,25 @@ def list_archive_contents(archive_path):
 
 def extract_file_from_archive(archive_path, file_in_archive, start_byte=0, end_byte=None):
     """Extract a specific file from an archive, optionally with byte range
+
+    Supports progressive extraction for incomplete archives by checking SABnzbd download status.
+
     Returns: bytes object containing the requested data
     """
     lower = archive_path.lower()
+
+    # Check SABnzbd status for progressive extraction
+    folder_name = os.path.basename(os.path.dirname(archive_path))
+    sabnzbd_status = get_sabnzbd_status(folder_name)
+
+    if sabnzbd_status:
+        percent = sabnzbd_status.get('percent_complete', 0)
+        status = sabnzbd_status.get('status', 'unknown')
+        print(f"[SABNZBD] Status for '{folder_name}': {status} ({percent:.1f}% complete)")
+
+        # If download is still in progress and very incomplete, warn user
+        if status == 'downloading' and percent < 10:
+            print(f"[SABNZBD] Warning: Archive is only {percent:.1f}% downloaded - extraction may fail")
 
     try:
         if lower.endswith('.zip'):
@@ -239,7 +346,20 @@ def extract_file_from_archive(archive_path, file_in_archive, start_byte=0, end_b
         return None
     except Exception as e:
         error_msg = str(e).lower()
-        if 'need to start from first volume' in error_msg or 'first volume' in error_msg:
+
+        # Check for incomplete archive errors
+        if 'failed to read enough data' in error_msg or 'failed the read enough data' in error_msg:
+            if sabnzbd_status:
+                percent = sabnzbd_status.get('percent_complete', 0)
+                status = sabnzbd_status.get('status', 'unknown')
+                print(f"[ARCHIVE] Archive incomplete - download is {percent:.1f}% complete (status: {status})")
+                print(f"[ARCHIVE] Error: Archive is still downloading ({percent:.1f}% complete). Please wait for download to complete.")
+            else:
+                print(f"[ARCHIVE] Archive appears incomplete but no SABnzbd status available: {os.path.basename(archive_path)}")
+                print(f"[ARCHIVE] Error: Archive is incomplete or corrupted - insufficient data available")
+            return None
+
+        elif 'need to start from first volume' in error_msg or 'first volume' in error_msg:
             print(f"[ARCHIVE] Error: Non-first volume used for extraction: {os.path.basename(archive_path)}")
         elif 'corrupt' in error_msg or 'damaged' in error_msg:
             print(f"[ARCHIVE] Corrupt or incomplete archive: {os.path.basename(archive_path)}")
