@@ -1528,10 +1528,14 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
         if (!nzoId && config.fileServerUrl) {
             console.log('[USENET] Checking file server for existing file before submitting NZB...');
             const { findVideoFileViaAPI } = await import('./server/usenet/video-finder.js');
+            const options = type === 'series'
+                ? { season: id.split(':')[1], episode: id.split(':')[2], sabnzbdUrl: config.sabnzbdUrl, sabnzbdApiKey: config.sabnzbdApiKey }
+                : { sabnzbdUrl: config.sabnzbdUrl, sabnzbdApiKey: config.sabnzbdApiKey };
+
             const existingFile = await findVideoFileViaAPI(
                 config.fileServerUrl,
                 decodedTitle,
-                type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+                options,
                 config.fileServerPassword
             );
 
@@ -1708,10 +1712,14 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                     // Query the file server API directly (don't check local filesystem)
                     // The file server has its own filesystem access and FUSE archive mounting
 
+                    const options = type === 'series'
+                        ? { season: id.split(':')[1], episode: id.split(':')[2], sabnzbdUrl: config.sabnzbdUrl, sabnzbdApiKey: config.sabnzbdApiKey }
+                        : { sabnzbdUrl: config.sabnzbdUrl, sabnzbdApiKey: config.sabnzbdApiKey };
+
                     const fileInfo = await findVideoFileViaAPI(
                         fileServerUrl,
                         decodedTitle,
-                        type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+                        options,
                         config.fileServerPassword
                     );
                     if (fileInfo) {
@@ -1791,10 +1799,14 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
 
                 if (hasRarFiles && fileServerUrl) {
                     console.log('[USENET] Completed RAR archive detected, using file server API with rar2fs');
+                    const options = type === 'series'
+                        ? { season: id.split(':')[1], episode: id.split(':')[2], sabnzbdUrl: config.sabnzbdUrl, sabnzbdApiKey: config.sabnzbdApiKey }
+                        : { sabnzbdUrl: config.sabnzbdUrl, sabnzbdApiKey: config.sabnzbdApiKey };
+
                     const fileInfo = await findVideoFileViaAPI(
                         fileServerUrl,
                         decodedTitle,
-                        type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+                        options,
                         config.fileServerPassword
                     );
                     if (fileInfo) {

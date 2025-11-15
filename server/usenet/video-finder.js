@@ -24,6 +24,13 @@ export async function findVideoFileViaAPI(fileServerUrl, releaseName, options = 
         if (apiKey) {
             headers['X-API-Key'] = apiKey;
         }
+        // Send SABnzbd config to file server for progressive extraction monitoring
+        if (options.sabnzbdUrl) {
+            headers['X-SABnzbd-URL'] = options.sabnzbdUrl;
+        }
+        if (options.sabnzbdApiKey) {
+            headers['X-SABnzbd-API-Key'] = options.sabnzbdApiKey;
+        }
         const response = await axios.get(`${fileServerUrl.replace(/\/$/, '')}/api/list`, {
             timeout: 15000, // Increased to 15s for on-demand archive extraction
             validateStatus: (status) => status === 200,

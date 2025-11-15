@@ -121,16 +121,18 @@ except ImportError:
     logger.warning("requests library not available - SABnzbd integration disabled")
 
 
-def get_sabnzbd_status(folder_name: str) -> Optional[Dict[str, Any]]:
-    """Query SABnzbd to get download status for a folder
+def get_sabnzbd_status_with_config(folder_name: str, sabnzbd_url: str, sabnzbd_api_key: str) -> Optional[Dict[str, Any]]:
+    """Query SABnzbd to get download status for a folder with specific config
 
     Args:
         folder_name: The folder name to search for in SABnzbd queue/history
+        sabnzbd_url: SABnzbd server URL
+        sabnzbd_api_key: SABnzbd API key
 
     Returns:
         Dict with status info including percent_complete, or None if not found/error
     """
-    if not REQUESTS_AVAILABLE or not config.SABNZBD_API_KEY:
+    if not REQUESTS_AVAILABLE or not sabnzbd_api_key:
         return None
 
     try:
@@ -138,11 +140,11 @@ def get_sabnzbd_status(folder_name: str) -> Optional[Dict[str, Any]]:
         params = {
             'mode': 'queue',
             'output': 'json',
-            'apikey': config.SABNZBD_API_KEY
+            'apikey': sabnzbd_api_key
         }
 
         response = requests.get(
-            f"{config.SABNZBD_URL}/api",
+            f"{sabnzbd_url}/api",
             params=params,
             timeout=5
         )
@@ -171,7 +173,7 @@ def get_sabnzbd_status(folder_name: str) -> Optional[Dict[str, Any]]:
         # Not in queue, check history
         params['mode'] = 'history'
         response = requests.get(
-            f"{config.SABNZBD_URL}/api",
+            f"{sabnzbd_url}/api",
             params=params,
             timeout=5
         )
@@ -194,6 +196,21 @@ def get_sabnzbd_status(folder_name: str) -> Optional[Dict[str, Any]]:
         logger.debug(f"Error querying SABnzbd for {folder_name}: {e}")
 
     return None
+
+
+def get_sabnzbd_status(folder_name: str) -> Optional[Dict[str, Any]]:
+    """Query SABnzbd to get download status for a folder using default config
+
+    Args:
+        folder_name: The folder name to search for in SABnzbd queue/history
+
+    Returns:
+        Dict with status info including percent_complete, or None if not found/error
+    """
+    if not config.SABNZBD_API_KEY:
+        return None
+
+    return get_sabnzbd_status_with_config(folder_name, config.SABNZBD_URL, config.SABNZBD_API_KEY)
 
 
 # === Archive Handling Functions ===
@@ -871,7 +888,7 @@ async def delete_file(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def stream_from_archive(file_path: str, range_header: Optional[str] = None):
+async def stream_from_archive(file_path: str, range_header: Optional[str] = None, request: Request = None):
     """Handle on-demand extraction from archives with range support"""
     try:
         # Parse path: archive://rel/path/to/archive.rar|video.mkv
@@ -893,8 +910,26 @@ async def stream_from_archive(file_path: str, range_header: Optional[str] = None
             raise HTTPException(status_code=404, detail=f"Archive not found: {archive_rel_path}")
 
         # Check SABnzbd status before attempting extraction
+        # First try to get SABnzbd config from request headers (user-specific)
+        sabnzbd_url = None
+        sabnzbd_api_key = None
+
+        if request:
+            sabnzbd_url = request.headers.get('X-SABnzbd-URL') or request.headers.get('X-Sabnzbd-Url')
+            sabnzbd_api_key = request.headers.get('X-SABnzbd-API-Key') or request.headers.get('X-Sabnzbd-Api-Key')
+
+        # Fall back to environment variables if not in headers
+        if not sabnzbd_url:
+            sabnzbd_url = config.SABNZBD_URL
+        if not sabnzbd_api_key:
+            sabnzbd_api_key = config.SABNZBD_API_KEY
+
         folder_name = os.path.basename(os.path.dirname(archive_path))
-        sabnzbd_status = get_sabnzbd_status(folder_name)
+        sabnzbd_status = None
+
+        if sabnzbd_url and sabnzbd_api_key and REQUESTS_AVAILABLE:
+            # Query SABnzbd with user-specific or default config
+            sabnzbd_status = get_sabnzbd_status_with_config(folder_name, sabnzbd_url, sabnzbd_api_key)
 
         if sabnzbd_status:
             percent = sabnzbd_status.get('percent_complete', 0)
@@ -1039,7 +1074,7 @@ async def stream_file(
 
     # Check for archive:// paths (on-demand extraction)
     if file_path.startswith('archive://'):
-        return await stream_from_archive(file_path, range)
+        return await stream_from_archive(file_path, range, request)
 
     root_dir = config.RAR2FS_MOUNT or config.SOURCE_DIR
     full_path = os.path.join(root_dir, file_path)

@@ -61,10 +61,14 @@ export async function waitForFileExtraction(params) {
             console.log(`[USENET] Checking for video file in: ${searchPath}`);
 
             if (fileServerUrl) {
+                const options = type === 'series'
+                    ? { season: id.split(':')[1], episode: id.split(':')[2], sabnzbdUrl: config.sabnzbdUrl, sabnzbdApiKey: config.sabnzbdApiKey }
+                    : { sabnzbdUrl: config.sabnzbdUrl, sabnzbdApiKey: config.sabnzbdApiKey };
+
                 const fileInfo = await findVideoFileViaAPI(
                     fileServerUrl,
                     decodedTitle,
-                    type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+                    options,
                     config.fileServerPassword
                 );
 
@@ -117,10 +121,14 @@ export async function waitForFileExtraction(params) {
             if (!fs.existsSync(status.path)) {
                 console.log('[USENET] ⚠️  Complete folder not found! Trying file server...');
                 if (fileServerUrl) {
+                    const options = type === 'series'
+                        ? { season: id.split(':')[1], episode: id.split(':')[2], sabnzbdUrl: config.sabnzbdUrl, sabnzbdApiKey: config.sabnzbdApiKey }
+                        : { sabnzbdUrl: config.sabnzbdUrl, sabnzbdApiKey: config.sabnzbdApiKey };
+
                     const fileInfo = await findVideoFileViaAPI(
                         fileServerUrl,
                         decodedTitle,
-                        type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+                        options,
                         config.fileServerPassword
                     );
                     if (fileInfo) {
@@ -142,10 +150,14 @@ export async function waitForFileExtraction(params) {
 
             if ((hasRarFiles || has7zFiles) && fileServerUrl) {
                 console.log(`[USENET] Completed archive detected (RAR: ${hasRarFiles}, 7z/ZIP: ${has7zFiles}), using file server API`);
+                const options = type === 'series'
+                    ? { season: id.split(':')[1], episode: id.split(':')[2], sabnzbdUrl: config.sabnzbdUrl, sabnzbdApiKey: config.sabnzbdApiKey }
+                    : { sabnzbdUrl: config.sabnzbdUrl, sabnzbdApiKey: config.sabnzbdApiKey };
+
                 const fileInfo = await findVideoFileViaAPI(
                     fileServerUrl,
                     decodedTitle,
-                    type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+                    options,
                     config.fileServerPassword
                 );
                 if (fileInfo) {
@@ -195,10 +207,14 @@ export async function waitForFileExtraction(params) {
 
             // Try one last time to find the file in complete folder via file server
             if (fileServerUrl) {
+                const options = type === 'series'
+                    ? { season: id.split(':')[1], episode: id.split(':')[2], sabnzbdUrl: config.sabnzbdUrl, sabnzbdApiKey: config.sabnzbdApiKey }
+                    : { sabnzbdUrl: config.sabnzbdUrl, sabnzbdApiKey: config.sabnzbdApiKey };
+
                 const fileInfo = await findVideoFileViaAPI(
                     fileServerUrl,
                     decodedTitle,
-                    type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+                    options,
                     config.fileServerPassword
                 );
 
