@@ -71,6 +71,7 @@ if (cluster.isMaster) {
     let proxyManager = null;
     let personalFilesCache = null;
     let serverInstance = null;
+    let sharedAxiosManager = null;
 
     try {
         const serverModule = await import('./server.js');
@@ -89,6 +90,9 @@ if (cluster.isMaster) {
 
         // Import personal files cache for cleanup
         personalFilesCache = (await import('./lib/util/personal-files-cache.js')).default;
+
+        // Import shared axios manager for cleanup
+        sharedAxiosManager = (await import('./lib/util/shared-axios.js')).default;
 
         // Get server instance from server module
         serverInstance = server;
@@ -124,15 +128,16 @@ if (cluster.isMaster) {
 
         console.log(`Worker ${process.pid} received ${signal}, shutting down gracefully...`);
 
-        // Shutdown rate limiters, proxy manager, and caches to clear intervals
+        // Shutdown rate limiters, proxy manager, caches, and axios to clear intervals and connections
         try {
             if (rdRateLimiter) rdRateLimiter.shutdown();
             if (adRateLimiter) adRateLimiter.shutdown();
             if (proxyManager) proxyManager.shutdown();
             if (personalFilesCache) personalFilesCache.shutdown();
-            console.log(`Worker ${process.pid} rate limiters, proxy manager, and cache intervals cleared`);
+            if (sharedAxiosManager) sharedAxiosManager.shutdown();
+            console.log(`Worker ${process.pid} rate limiters, proxy manager, cache intervals, and HTTP connections cleared`);
         } catch (error) {
-            console.error(`Worker ${process.pid} Error shutting down rate limiters/proxy/cache: ${error.message}`);
+            console.error(`Worker ${process.pid} Error shutting down services: ${error.message}`);
         }
 
         // Close SQLite connections
