@@ -68,6 +68,9 @@ typings/
 # Yarn Integrity file
 .yarn-integrity
 
+# Lock files (project uses pnpm)
+package-lock.json
+
 # dotenv environment variables file
 .env
 .env.test
