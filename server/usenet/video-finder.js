@@ -39,8 +39,11 @@ export async function findVideoFileViaAPI(fileServerUrl, releaseName, options = 
 
         // Filter files that match the release name (normalize the folder path)
         // Strip common extensions to improve matching (SABnzbd folder names often include .mkv, .avi, etc)
+        console.log(`[USENET] Input release name: "${releaseName}"`);
         const normalizedRelease = releaseName.toLowerCase()
             .replace(/\.(mkv|avi|mp4|mov|wmv|flv|webm|m4v|mpg|mpeg)$/i, '');
+        console.log(`[USENET] Normalized release (extension stripped): "${normalizedRelease}"`);
+
 
         let matchingFiles = response.data.files.filter(file => {
             if (!file || !file.path) {
