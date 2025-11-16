@@ -1640,15 +1640,15 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
         // Check current download status
         let status = await SABnzbd.getDownloadStatus(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId);
 
-        // Only wait if download hasn't reached 5% yet
-        if ((status.percentComplete || 0) < 5 && status.status !== 'completed') {
+        // Only wait if download hasn't reached 1% yet
+        if ((status.percentComplete || 0) < 1 && status.status !== 'completed') {
             console.log('[USENET] Waiting for download to start...');
             try {
                 status = await Usenet.waitForStreamingReady(
                     config.sabnzbdUrl,
                     config.sabnzbdApiKey,
                     nzoId,
-                    5, // 5% minimum - ensure enough data for initial streaming
+                    1, // 1% minimum - start streaming as soon as possible
                     60000 // 1 minute max wait for download to start
                 );
             } catch (error) {
