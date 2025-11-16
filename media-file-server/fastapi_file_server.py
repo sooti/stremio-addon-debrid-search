@@ -99,6 +99,14 @@ class Config:
 
 config = Config()
 
+# Global file index cache - continuously updated by background scanner
+FILE_INDEX_CACHE = {
+    'files': [],
+    'last_scan': 0,
+    'scanning': False
+}
+FILE_INDEX_LOCK = asyncio.Lock()
+
 
 # === Archive Handling Functions ===
 
@@ -425,6 +433,141 @@ async def pregenerate_common_error_videos():
     logger.info(f"Pre-generated {len(common_errors)} common error videos")
 
 
+async def scan_files_once() -> List[Dict[str, Any]]:
+    """Scan directory tree once and return list of video files"""
+    files = []
+    seen_files = set()
+
+    root_dir = config.RAR2FS_MOUNT or config.SOURCE_DIR
+    if not os.path.exists(root_dir):
+        logger.warning(f"Root directory does not exist: {root_dir}")
+        return files
+
+    try:
+        # Scan for direct video files
+        for root, dirs, files_list in os.walk(root_dir):
+            for filename in files_list:
+                ext = os.path.splitext(filename)[1].lower()
+                if ext in config.VIDEO_EXTENSIONS:
+                    full_path = os.path.join(root, filename)
+                    rel_path = os.path.relpath(full_path, root_dir)
+
+                    try:
+                        stat = os.stat(full_path)
+                        is_complete = 'incomplete' not in rel_path.lower()
+                        folder_name = os.path.basename(os.path.dirname(full_path))
+
+                        files.append({
+                            'name': filename,
+                            'path': rel_path.replace('\\', '/'),
+                            'flatPath': filename,
+                            'folderName': folder_name,
+                            'size': stat.st_size,
+                            'modified': stat.st_mtime,
+                            'isComplete': is_complete
+                        })
+                        seen_files.add(filename)
+                    except Exception as e:
+                        logger.debug(f"Error stating file {full_path}: {e}")
+
+        # Scan for archive files and list their video contents
+        archives_found = 0
+        videos_in_archives = 0
+
+        for root, dirs, files_list in os.walk(root_dir):
+            for archive_file in find_archives_in_directory(root):
+                archives_found += 1
+                archive_path = os.path.join(root, archive_file)
+                rel_archive_path = os.path.relpath(archive_path, root_dir)
+
+                try:
+                    archive_contents = list_archive_contents(archive_path)
+
+                    for item in archive_contents:
+                        if item['is_dir']:
+                            continue
+
+                        ext = os.path.splitext(item['name'])[1].lower()
+                        if ext in config.VIDEO_EXTENSIONS:
+                            filename = os.path.basename(item['name'])
+
+                            if filename in seen_files:
+                                continue
+
+                            is_complete = 'incomplete' not in rel_archive_path.lower()
+                            folder_name = os.path.basename(os.path.dirname(archive_path))
+                            archive_internal_path = f"archive://{rel_archive_path}|{item['name']}"
+
+                            files.append({
+                                'name': filename,
+                                'path': archive_internal_path.replace('\\', '/'),
+                                'flatPath': filename,
+                                'folderName': folder_name,
+                                'size': item['size'],
+                                'modified': os.path.getmtime(archive_path),
+                                'isComplete': is_complete,
+                                'inArchive': True
+                            })
+                            seen_files.add(filename)
+                            videos_in_archives += 1
+                except Exception as e:
+                    logger.debug(f"Error reading archive {archive_path}: {e}")
+
+        if archives_found > 0:
+            logger.debug(f"Found {archives_found} archives containing {videos_in_archives} video files")
+
+    except Exception as e:
+        logger.error(f"Error scanning files: {e}")
+
+    # Sort by completion status and modification time
+    files.sort(key=lambda x: (not x['isComplete'], -x['modified']))
+
+    return files
+
+
+async def continuous_file_scanner():
+    """Background task that continuously scans for new video files"""
+    logger.info("🔄 Starting continuous file scanner (1 second interval)")
+    scan_count = 0
+
+    while True:
+        try:
+            # Use lock to prevent concurrent scans
+            async with FILE_INDEX_LOCK:
+                if not FILE_INDEX_CACHE['scanning']:
+                    FILE_INDEX_CACHE['scanning'] = True
+
+                    try:
+                        # Perform scan
+                        files = await scan_files_once()
+
+                        # Update cache
+                        old_count = len(FILE_INDEX_CACHE['files'])
+                        FILE_INDEX_CACHE['files'] = files
+                        FILE_INDEX_CACHE['last_scan'] = time.time()
+
+                        scan_count += 1
+                        new_count = len(files)
+
+                        # Log only when file count changes
+                        if new_count != old_count:
+                            completed = sum(1 for f in files if f['isComplete'])
+                            incomplete = new_count - completed
+                            logger.info(f"📊 File index updated: {new_count} files ({completed} complete, {incomplete} in progress)")
+                        elif scan_count % 60 == 0:  # Log every 60 scans (~1 minute)
+                            logger.debug(f"Scanner heartbeat: {new_count} files indexed (scan #{scan_count})")
+
+                    finally:
+                        FILE_INDEX_CACHE['scanning'] = False
+
+        except Exception as e:
+            logger.error(f"Error in continuous scanner: {e}")
+            FILE_INDEX_CACHE['scanning'] = False
+
+        # Wait 1 second before next scan (fast detection of new files)
+        await asyncio.sleep(1)
+
+
 # === API Endpoints ===
 
 @app.get("/health")
@@ -442,99 +585,16 @@ async def health_check():
 async def list_files(
     authenticated: bool = Depends(verify_api_key)
 ) -> JSONResponse:
-    """List all video files in the directory tree"""
-    files = []
-    seen_files = set()
+    """List all video files (from cached index updated by background scanner)"""
+    # Return cached data - updated every 1 second by background scanner
+    async with FILE_INDEX_LOCK:
+        files = FILE_INDEX_CACHE['files'].copy()
+        last_scan_age = time.time() - FILE_INDEX_CACHE['last_scan']
 
-    # Scan primary directory
-    root_dir = config.RAR2FS_MOUNT or config.SOURCE_DIR
-    logger.info(f"Scanning directory: {root_dir}")
-
-    for root, dirs, files_list in os.walk(root_dir):
-        for filename in files_list:
-            ext = os.path.splitext(filename)[1].lower()
-            if ext in config.VIDEO_EXTENSIONS:
-                full_path = os.path.join(root, filename)
-                rel_path = os.path.relpath(full_path, root_dir)
-
-                try:
-                    stat = os.stat(full_path)
-                    is_complete = 'incomplete' not in rel_path.lower()
-                    folder_name = os.path.basename(os.path.dirname(full_path))
-
-                    files.append({
-                        'name': filename,
-                        'path': rel_path.replace('\\', '/'),
-                        'flatPath': filename,
-                        'folderName': folder_name,
-                        'size': stat.st_size,
-                        'modified': stat.st_mtime,
-                        'isComplete': is_complete
-                    })
-                    seen_files.add(filename)
-                except Exception as e:
-                    logger.error(f"Error stating file {full_path}: {e}")
-
-    # Now scan for archive files and list their video contents
-    logger.info("Scanning for archive files (RAR, 7z, ZIP)")
-    archives_found = 0
-    videos_in_archives = 0
-
-    for root, dirs, files_list in os.walk(root_dir):
-        for archive_file in find_archives_in_directory(root):
-            archives_found += 1
-            archive_path = os.path.join(root, archive_file)
-            rel_archive_path = os.path.relpath(archive_path, root_dir)
-
-            try:
-                # List contents of archive
-                archive_contents = list_archive_contents(archive_path)
-
-                # Filter for video files
-                for item in archive_contents:
-                    if item['is_dir']:
-                        continue
-
-                    ext = os.path.splitext(item['name'])[1].lower()
-                    if ext in config.VIDEO_EXTENSIONS:
-                        filename = os.path.basename(item['name'])
-
-                        # Skip if we already have this filename (avoid duplicates)
-                        if filename in seen_files:
-                            continue
-
-                        # Mark as complete if NOT in incomplete directory
-                        is_complete = 'incomplete' not in rel_archive_path.lower()
-
-                        # Extract folder name (archive's parent directory)
-                        folder_name = os.path.basename(os.path.dirname(archive_path))
-
-                        # Special path format: archive://rel/path/to/archive.rar|video.mkv
-                        archive_internal_path = f"archive://{rel_archive_path}|{item['name']}"
-
-                        files.append({
-                            'name': filename,
-                            'path': archive_internal_path.replace('\\', '/'),
-                            'flatPath': filename,
-                            'folderName': folder_name,
-                            'size': item['size'],
-                            'modified': os.path.getmtime(archive_path),
-                            'isComplete': is_complete,
-                            'inArchive': True  # Flag to indicate this is from an archive
-                        })
-                        seen_files.add(filename)
-                        videos_in_archives += 1
-            except Exception as e:
-                logger.error(f"Error reading archive {archive_path}: {e}")
-
-    logger.info(f"Found {archives_found} archives containing {videos_in_archives} video files")
-
-    # Sort by completion status and modification time
-    files.sort(key=lambda x: (not x['isComplete'], -x['modified']))
-
+    # Log API call details
     completed_count = sum(1 for f in files if f['isComplete'])
     incomplete_count = len(files) - completed_count
-    logger.info(f"Found {len(files)} total files ({completed_count} completed, {incomplete_count} in progress)")
+    logger.info(f"API /list: Returning {len(files)} files ({completed_count} complete, {incomplete_count} in progress) - cache age: {last_scan_age:.1f}s")
 
     return JSONResponse(content={'files': files})
 
@@ -837,23 +897,22 @@ async def startup_event():
     # Pre-generate common error videos
     await pregenerate_common_error_videos()
 
-    # Count files
-    video_count = 0
-    rar_count = 0
-    root_dir = config.RAR2FS_MOUNT or config.SOURCE_DIR
+    # Perform initial file scan
+    logger.info("📂 Performing initial file scan...")
+    initial_files = await scan_files_once()
+    async with FILE_INDEX_LOCK:
+        FILE_INDEX_CACHE['files'] = initial_files
+        FILE_INDEX_CACHE['last_scan'] = time.time()
 
-    try:
-        for root, dirs, files in os.walk(root_dir):
-            for filename in files:
-                ext = os.path.splitext(filename)[1].lower()
-                if ext in config.VIDEO_EXTENSIONS:
-                    video_count += 1
-                elif ext in ['.rar', '.zip'] or re.match(r'\.r\d+$', ext):
-                    rar_count += 1
-    except Exception as e:
-        logger.warning(f"Could not scan directory: {e}")
+    video_count = len(initial_files)
+    completed = sum(1 for f in initial_files if f['isComplete'])
+    incomplete = video_count - completed
 
-    logger.info(f"📊 Found {video_count} video files, {rar_count} RAR archives")
+    logger.info(f"📊 Initial scan: {video_count} video files ({completed} complete, {incomplete} in progress)")
+
+    # Start continuous background scanner
+    asyncio.create_task(continuous_file_scanner())
+    logger.info("✅ Background file scanner started (1 second refresh)")
     logger.info("=" * 70)
 
 
