@@ -168,6 +168,11 @@ def extract_file_from_archive(archive_path: str, file_in_archive: str, start_byt
         # Extract full file first
         data = None
 
+        # For large range requests (>100MB), limit to prevent memory issues
+        if end_byte and (end_byte - start_byte) > 100 * 1024 * 1024:
+            logger.warning(f"Large range request: {(end_byte - start_byte) / 1024 / 1024:.2f} MB, limiting to 100MB")
+            end_byte = start_byte + (100 * 1024 * 1024)
+
         if lower.endswith('.zip'):
             with zipfile.ZipFile(archive_path, 'r') as zf:
                 data = zf.read(file_in_archive)
@@ -187,6 +192,13 @@ def extract_file_from_archive(archive_path: str, file_in_archive: str, start_byt
 
         # Apply byte range if requested
         if end_byte is None:
+            end_byte = len(data)
+
+        # Validate range
+        if start_byte >= len(data):
+            raise Exception(f"Range not satisfiable: start_byte={start_byte} >= file_size={len(data)}")
+
+        if end_byte > len(data):
             end_byte = len(data)
 
         return data[start_byte:end_byte]
@@ -752,8 +764,28 @@ async def stream_from_archive(file_path: str, range_header: Optional[str] = None
         logger.info(f"Extracting bytes {start}-{end} ({content_length} bytes, {content_length/1024/1024:.2f} MB)")
 
         try:
-            # Extract with range support
-            data = extract_file_from_archive(archive_path, internal_file, start, end + 1)
+            # Warn if large file - extraction will load entire file into memory
+            if file_size > 500 * 1024 * 1024:  # > 500MB
+                logger.warning(f"Large file extraction: {file_size / 1024 / 1024:.2f} MB - this may be slow")
+
+            # Extract with range support and timeout
+            # Run extraction in thread pool to avoid blocking event loop
+            import concurrent.futures
+            loop = asyncio.get_event_loop()
+
+            try:
+                # Use timeout for large files (30 seconds)
+                timeout = 30 if file_size > 100 * 1024 * 1024 else 10
+                data = await asyncio.wait_for(
+                    loop.run_in_executor(None, extract_file_from_archive, archive_path, internal_file, start, end + 1),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"Extraction timeout after {timeout}s for {file_size / 1024 / 1024:.2f} MB file")
+                raise HTTPException(
+                    status_code=408,
+                    detail=f"Extraction timeout - file too large ({file_size / 1024 / 1024:.2f} MB). Try seeking less far."
+                )
 
             if not data:
                 logger.error("Extraction returned no data")
@@ -764,13 +796,16 @@ async def stream_from_archive(file_path: str, range_header: Optional[str] = None
                 "Content-Range": f"bytes {start}-{end}/{file_size}",
                 "Accept-Ranges": "bytes",
                 "Content-Length": str(len(data)),
-                "Content-Type": "application/octet-stream"
+                "Content-Type": "application/octet-stream",
+                "Cache-Control": "no-cache"  # Don't cache partial responses
             }
 
             logger.info(f"✓ Sending {len(data)} bytes from archive")
 
             return Response(content=data, status_code=206, headers=headers, media_type="application/octet-stream")
 
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error extracting file: {e}")
             raise HTTPException(status_code=500, detail=f"Error extracting file: {str(e)}")
