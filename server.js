@@ -46,6 +46,18 @@ console.log('[CACHE] Using SQLite for local caching');
 
 // Override console to respect LOG_LEVEL environment variable
 overrideConsole();
+
+// CRITICAL: Global error handlers to prevent memory leaks from unhandled errors (worker processes)
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('[WORKER-CRITICAL] Unhandled Promise Rejection:', reason?.message || reason);
+    // Don't log the full error object to avoid retaining large response bodies in memory
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('[WORKER-CRITICAL] Uncaught Exception:', error?.message || error);
+    // Don't log the full error object to avoid retaining large response bodies in memory
+});
+
 // Import compression if available, otherwise provide a no-op middleware
 let compression = null;
 try {
@@ -215,8 +227,19 @@ async function redirectToErrorVideo(errorText, res, fileServerUrl) {
         // Handle errors during streaming
         response.data.on('error', (err) => {
             console.error(`[ERROR-VIDEO] Stream error: ${err.message}`);
+            // CRITICAL: Destroy the stream on error to prevent memory leak
+            if (response.data && typeof response.data.destroy === 'function') {
+                response.data.destroy();
+            }
             if (!res.headersSent) {
                 res.status(500).end();
+            }
+        });
+
+        // CRITICAL: Clean up stream when client disconnects
+        res.on('close', () => {
+            if (response.data && typeof response.data.destroy === 'function') {
+                response.data.destroy();
             }
         });
 

@@ -8,6 +8,17 @@ import { memoryMonitor } from './lib/util/memory-monitor.js';
 // Override console to respect LOG_LEVEL environment variable
 overrideConsole();
 
+// CRITICAL: Global error handlers to prevent memory leaks from unhandled errors
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('[CRITICAL] Unhandled Promise Rejection:', reason?.message || reason);
+    // Don't log the full error object to avoid retaining large response bodies in memory
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('[CRITICAL] Uncaught Exception:', error?.message || error);
+    // Don't log the full error object to avoid retaining large response bodies in memory
+});
+
 const numCPUs = os.cpus().length;
 
 // Determine number of workers: use CPU count as optimal default, with MAX_WORKERS override
