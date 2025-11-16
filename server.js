@@ -1465,20 +1465,47 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
         }
 
         const decodedReleaseName = decodeURIComponent(releaseName);
-        console.log(`[USENET-UNIVERSAL] Stream request for: ${decodedReleaseName}`);
+        const nzoId = req.query.nzoId ? decodeURIComponent(req.query.nzoId) : null;
+        console.log(`[USENET-UNIVERSAL] Stream request for: ${decodedReleaseName}${nzoId ? ` (nzoId: ${nzoId})` : ''}`);
 
         // Query file server API to find current file location
         // Poll for up to 2 minutes to allow time for extraction/download to start
         const { findVideoFileViaAPI } = await import('./server/usenet/video-finder.js');
+        const SABnzbd = (await import('./lib/sabnzbd.js')).default;
 
         const maxWaitTime = 120000; // 2 minutes
         const pollInterval = 1000; // Check every 1 second
         const startTime = Date.now();
         let fileInfo = null;
         let attempt = 0;
+        let lastProgress = -1;
 
         while (!fileInfo && (Date.now() - startTime) < maxWaitTime) {
             attempt++;
+
+            // Check SABnzbd download status if nzoId is available
+            let downloadStatus = null;
+            if (nzoId && config.sabnzbdUrl && config.sabnzbdApiKey) {
+                try {
+                    downloadStatus = await SABnzbd.getDownloadStatus(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId);
+
+                    // Log progress changes
+                    const currentProgress = downloadStatus.percentComplete || 0;
+                    if (currentProgress !== lastProgress && currentProgress > 0) {
+                        console.log(`[USENET-UNIVERSAL] SABnzbd download progress: ${currentProgress.toFixed(1)}% (status: ${downloadStatus.status})`);
+                        lastProgress = currentProgress;
+                    }
+
+                    // Check for errors
+                    if (downloadStatus.status === 'error' || downloadStatus.status === 'failed') {
+                        const errorMsg = downloadStatus.error || downloadStatus.failMessage || 'Unknown error';
+                        console.log(`[USENET-UNIVERSAL] Download failed: ${errorMsg}`);
+                        return res.status(500).send(`Download failed: ${errorMsg}`);
+                    }
+                } catch (error) {
+                    console.log(`[USENET-UNIVERSAL] Could not check SABnzbd status: ${error.message}`);
+                }
+            }
 
             fileInfo = await findVideoFileViaAPI(
                 config.fileServerUrl,
@@ -1496,7 +1523,8 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
                 console.log(`[USENET-UNIVERSAL] Video file not immediately available, polling for up to 2 minutes...`);
             } else if (attempt % 10 === 0) {
                 const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-                console.log(`[USENET-UNIVERSAL] Still waiting for file... (${elapsed}s elapsed, attempt ${attempt})`);
+                const progressInfo = downloadStatus ? ` | Download: ${downloadStatus.percentComplete?.toFixed(1) || 0}%` : '';
+                console.log(`[USENET-UNIVERSAL] Still waiting for file... (${elapsed}s elapsed, attempt ${attempt}${progressInfo})`);
             }
 
             // Wait before next poll
@@ -1896,7 +1924,8 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
             const encodedId = encodeURIComponent(id);
             const configParam = encodeURIComponent(configJson);
 
-            const universalUrl = `/usenet/universal/${encodedReleaseName}/${encodedType}/${encodedId}?config=${configParam}`;
+            // Pass nzoId to allow monitoring download progress during polling
+            const universalUrl = `/usenet/universal/${encodedReleaseName}/${encodedType}/${encodedId}?config=${configParam}&nzoId=${encodeURIComponent(nzoId)}`;
             console.log(`[USENET] Redirecting to: ${universalUrl}`);
 
             return res.redirect(307, universalUrl);
