@@ -38,21 +38,30 @@ export async function findVideoFileViaAPI(fileServerUrl, releaseName, options = 
         console.log(`[USENET] File server returned ${response.data.files.length} total video files`);
 
         // Filter files that match the release name (normalize the folder path)
-        const normalizedRelease = releaseName.toLowerCase();
+        // Strip common extensions to improve matching (SABnzbd folder names often include .mkv, .avi, etc)
+        const normalizedRelease = releaseName.toLowerCase()
+            .replace(/\.(mkv|avi|mp4|mov|wmv|flv|webm|m4v|mpg|mpeg)$/i, '');
+
         let matchingFiles = response.data.files.filter(file => {
             if (!file || !file.path) {
                 console.log(`[USENET] Warning: Invalid file entry in response`);
                 return false;
             }
             const filePath = file.path.toLowerCase();
-            const fileName = file.name ? file.name.toLowerCase() : '';
+            const fileName = file.name ? file.name.toLowerCase().replace(/\.(mkv|avi|mp4|mov|wmv|flv|webm|m4v|mpg|mpeg)$/i, '') : '';
 
             // Match if path contains release name OR filename contains release name
-            // This helps find files in nested subdirectories
+            // This helps find files in nested subdirectories and archive:// paths
+            // Also try matching without extension for flexibility
             const pathMatch = filePath.includes(normalizedRelease);
-            const nameMatch = fileName.includes(normalizedRelease);
+            const nameMatch = fileName.includes(normalizedRelease) || normalizedRelease.includes(fileName);
 
-            return pathMatch || nameMatch;
+            // For very close matches, also try exact equality after removing special chars
+            const cleanRelease = normalizedRelease.replace(/[._-]/g, '');
+            const cleanFileName = fileName.replace(/[._-]/g, '');
+            const fuzzyMatch = cleanFileName && cleanRelease.includes(cleanFileName);
+
+            return pathMatch || nameMatch || fuzzyMatch;
         });
 
         console.log(`[USENET] Found ${matchingFiles.length} files matching release "${releaseName}"`);

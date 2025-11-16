@@ -58,8 +58,9 @@ export async function waitForFileExtraction(params) {
                 searchPath = status.incompletePath;
             }
 
-            console.log(`[USENET] Checking for video file in: ${searchPath}`);
+            console.log(`[USENET] Checking for video file in: ${searchPath} (${status.percentComplete?.toFixed(1) || 0}% complete)`);
 
+            // Try file server API first (works for both archives and direct videos)
             if (fileServerUrl) {
                 const fileInfo = await findVideoFileViaAPI(
                     fileServerUrl,
@@ -69,24 +70,34 @@ export async function waitForFileExtraction(params) {
                 );
 
                 if (fileInfo) {
-                    // Use the full path from the file server (no cleaning needed)
                     videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${fileInfo.path}`;
                     videoFileSize = fileInfo.size;
-                    console.log('[USENET] Found video file via API:', videoFilePath);
+                    console.log('[USENET] ✓ Found video file via API (during download):', videoFilePath);
                     break;
                 } else {
                     console.log(`[USENET] Video file not found yet via API. Progress: ${status.percentComplete?.toFixed(1) || 0}%`);
                 }
-            } else if (searchPath && fs.existsSync(searchPath)) {
-                // Fallback to direct filesystem search
+            }
+
+            // Fallback to local filesystem if file server unavailable or failed
+            if (!videoFilePath && searchPath && fs.existsSync(searchPath)) {
                 videoFilePath = await findVideoFile(
                     searchPath,
                     actualFolderName,
                     type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {}
                 );
                 if (videoFilePath) {
-                    console.log('[USENET] Found video file in download folder:', videoFilePath);
-                    break;
+                    console.log('[USENET] ✓ Found video file in local filesystem (during download):', videoFilePath);
+                    // For partial downloads, verify file has minimum size (5% of expected or 100MB, whichever is smaller)
+                    const minSize = Math.min(100 * 1024 * 1024, (videoFileSize || 0) * 0.05);
+                    const actualSize = fs.statSync(videoFilePath).size;
+                    if (actualSize >= minSize) {
+                        console.log(`[USENET] ✓ File has sufficient size for streaming: ${(actualSize / 1024 / 1024).toFixed(2)} MB`);
+                        break;
+                    } else {
+                        console.log(`[USENET] File too small for streaming yet: ${(actualSize / 1024 / 1024).toFixed(2)} MB < ${(minSize / 1024 / 1024).toFixed(2)} MB`);
+                        videoFilePath = null; // Reset and keep waiting
+                    }
                 }
             }
 
@@ -139,9 +150,16 @@ export async function waitForFileExtraction(params) {
 
             const hasRarFiles = filesInDir.some(f => f.toLowerCase().match(/\.(rar|r\d+)$/));
             const has7zFiles = filesInDir.some(f => f.toLowerCase().match(/\.7z|\.zip/));
+            const hasVideoFiles = filesInDir.some(f => {
+                const ext = f.toLowerCase().match(/\.(mkv|avi|mp4|mov|wmv|flv|webm|m4v|mpg|mpeg)$/);
+                return ext && !f.toLowerCase().includes('sample');
+            });
 
-            if ((hasRarFiles || has7zFiles) && fileServerUrl) {
-                console.log(`[USENET] Completed archive detected (RAR: ${hasRarFiles}, 7z/ZIP: ${has7zFiles}), using file server API`);
+            console.log(`[USENET] File analysis: RAR=${hasRarFiles}, 7z/ZIP=${has7zFiles}, DirectVideo=${hasVideoFiles}`);
+
+            // Always try file server API first if available (handles both archives and direct videos)
+            if (fileServerUrl) {
+                console.log(`[USENET] Querying file server API for video file`);
                 const fileInfo = await findVideoFileViaAPI(
                     fileServerUrl,
                     actualFolderName,
@@ -149,24 +167,25 @@ export async function waitForFileExtraction(params) {
                     config.fileServerPassword
                 );
                 if (fileInfo) {
-                    // Use the full path from the file server (no cleaning needed)
                     videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${fileInfo.path}`;
                     videoFileSize = fileInfo.size;
-                    console.log('[USENET] Found video file via API (completed):', videoFilePath);
+                    console.log('[USENET] ✓ Found video file via API:', videoFilePath);
                     break;
                 } else {
-                    console.log('[USENET] File server API did not return a video file');
+                    console.log('[USENET] File server API did not return a video file, trying local filesystem');
                 }
-            } else {
-                // Direct video file (no RAR)
-                console.log('[USENET] No archive files, looking for direct video file');
+            }
+
+            // Fallback to local filesystem if file server unavailable or failed
+            if (!videoFilePath) {
+                console.log('[USENET] Searching for video file in local filesystem');
                 videoFilePath = await findVideoFile(
                     status.path,
                     actualFolderName,
                     type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {}
                 );
                 if (videoFilePath) {
-                    console.log('[USENET] Found direct video file (completed):', videoFilePath);
+                    console.log('[USENET] ✓ Found video file in local filesystem:', videoFilePath);
                     break;
                 } else {
                     console.log('[USENET] No video file found in complete folder');
