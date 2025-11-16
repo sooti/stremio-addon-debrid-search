@@ -53,7 +53,7 @@ export async function waitForFileExtraction(params) {
         if (status.status === 'downloading') {
             // Build path to incomplete download folder
             if (sabnzbdConfig?.incompleteDir) {
-                searchPath = path.join(sabnzbdConfig.incompleteDir, decodedTitle);
+                searchPath = path.join(sabnzbdConfig.incompleteDir, actualFolderName);
             } else if (status.incompletePath) {
                 searchPath = status.incompletePath;
             }
@@ -63,7 +63,7 @@ export async function waitForFileExtraction(params) {
             if (fileServerUrl) {
                 const fileInfo = await findVideoFileViaAPI(
                     fileServerUrl,
-                    decodedTitle,
+                    actualFolderName,
                     type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
                     config.fileServerPassword
                 );
@@ -81,7 +81,7 @@ export async function waitForFileExtraction(params) {
                 // Fallback to direct filesystem search
                 videoFilePath = await findVideoFile(
                     searchPath,
-                    decodedTitle,
+                    actualFolderName,
                     type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {}
                 );
                 if (videoFilePath) {
@@ -119,7 +119,7 @@ export async function waitForFileExtraction(params) {
                 if (fileServerUrl) {
                     const fileInfo = await findVideoFileViaAPI(
                         fileServerUrl,
-                        decodedTitle,
+                        actualFolderName,
                         type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
                         config.fileServerPassword
                     );
@@ -144,7 +144,7 @@ export async function waitForFileExtraction(params) {
                 console.log(`[USENET] Completed archive detected (RAR: ${hasRarFiles}, 7z/ZIP: ${has7zFiles}), using file server API`);
                 const fileInfo = await findVideoFileViaAPI(
                     fileServerUrl,
-                    decodedTitle,
+                    actualFolderName,
                     type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
                     config.fileServerPassword
                 );
@@ -162,7 +162,7 @@ export async function waitForFileExtraction(params) {
                 console.log('[USENET] No archive files, looking for direct video file');
                 videoFilePath = await findVideoFile(
                     status.path,
-                    decodedTitle,
+                    actualFolderName,
                     type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {}
                 );
                 if (videoFilePath) {
@@ -178,6 +178,13 @@ export async function waitForFileExtraction(params) {
         console.log(`[USENET] Video file not extracted yet, waiting... Progress: ${status.percentComplete?.toFixed(1) || 0}%`);
         await new Promise(resolve => setTimeout(resolve, fileCheckInterval));
         status = await SABnzbd.getDownloadStatus(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId);
+
+        // Update actual folder name in case it changed
+        if (status.incompletePath) {
+            actualFolderName = path.basename(status.incompletePath);
+        } else if (status.name) {
+            actualFolderName = status.name;
+        }
 
         // Check for failures
         if (status.status === 'error' || status.status === 'failed') {
@@ -197,7 +204,7 @@ export async function waitForFileExtraction(params) {
             if (fileServerUrl) {
                 const fileInfo = await findVideoFileViaAPI(
                     fileServerUrl,
-                    decodedTitle,
+                    actualFolderName,
                     type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
                     config.fileServerPassword
                 );
