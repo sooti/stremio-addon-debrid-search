@@ -258,6 +258,8 @@ async function redirectToErrorVideo(errorText, res, fileServerUrl) {
 const USENET_CONFIGS = new Map(); // fileServerUrl -> config
 // Track pending Usenet submissions to prevent race conditions
 const PENDING_USENET_SUBMISSIONS = new Map(); // title -> Promise
+// Track active file wait operations for cancellation
+const ACTIVE_FILE_WAITS = new Map(); // nzoId -> AbortController
 
 // Cleanup interval for inactive streams (check every 2 minutes)
 const STREAM_CLEANUP_INTERVAL = 2 * 60 * 1000;
@@ -1585,6 +1587,16 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
             }
 
             if (!nzoId) {
+                // Cancel ALL active file wait operations before deleting downloads
+                if (ACTIVE_FILE_WAITS.size > 0) {
+                    console.log(`[USENET] Cancelling ${ACTIVE_FILE_WAITS.size} active file wait operation(s)...`);
+                    for (const [waitNzoId, abortController] of ACTIVE_FILE_WAITS.entries()) {
+                        console.log(`[USENET] Aborting file wait for: ${waitNzoId}`);
+                        abortController.abort();
+                    }
+                    ACTIVE_FILE_WAITS.clear();
+                }
+
                 // Delete ALL incomplete downloads BEFORE submitting new one to free up bandwidth immediately
                 console.log('[USENET] Deleting all incomplete downloads to free bandwidth for new stream...');
                 const deletedCount = await SABnzbd.deleteAllExcept(
@@ -1711,7 +1723,17 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
         const fileCheckInterval = 1000; // Check every 1 second (faster detection)
         const fileCheckStart = Date.now();
 
+        // Create AbortController for this file wait operation
+        const abortController = new AbortController();
+        ACTIVE_FILE_WAITS.set(nzoId, abortController);
+
+        try {
         while (Date.now() - fileCheckStart < maxWaitForFile) {
+            // Check if operation was aborted (new stream requested)
+            if (abortController.signal.aborted) {
+                console.log(`[USENET] File wait operation aborted for ${nzoId} (new stream requested)`);
+                throw new Error('Stream cancelled - new download requested');
+            }
             // Try to find video file in incomplete folder first (for progressive streaming)
             if (status.status === 'downloading') {
                 // Build path to incomplete download folder
@@ -1856,6 +1878,10 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                 }
                 return redirectToErrorVideo(errorMsg, res, fileServerUrl);
             }
+        }
+        } finally {
+            // Clean up AbortController when file wait completes or aborts
+            ACTIVE_FILE_WAITS.delete(nzoId);
         }
 
         // Check if videoFilePath is a URL or local file
