@@ -1468,17 +1468,45 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
         console.log(`[USENET-UNIVERSAL] Stream request for: ${decodedReleaseName}`);
 
         // Query file server API to find current file location
+        // Poll for up to 2 minutes to allow time for extraction/download to start
         const { findVideoFileViaAPI } = await import('./server/usenet/video-finder.js');
-        const fileInfo = await findVideoFileViaAPI(
-            config.fileServerUrl,
-            decodedReleaseName,
-            type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
-            config.fileServerPassword
-        );
+
+        const maxWaitTime = 120000; // 2 minutes
+        const pollInterval = 1000; // Check every 1 second
+        const startTime = Date.now();
+        let fileInfo = null;
+        let attempt = 0;
+
+        while (!fileInfo && (Date.now() - startTime) < maxWaitTime) {
+            attempt++;
+
+            fileInfo = await findVideoFileViaAPI(
+                config.fileServerUrl,
+                decodedReleaseName,
+                type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+                config.fileServerPassword
+            );
+
+            if (fileInfo) {
+                console.log(`[USENET-UNIVERSAL] ✓ Found video file on attempt ${attempt}`);
+                break;
+            }
+
+            if (attempt === 1) {
+                console.log(`[USENET-UNIVERSAL] Video file not immediately available, polling for up to 2 minutes...`);
+            } else if (attempt % 10 === 0) {
+                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                console.log(`[USENET-UNIVERSAL] Still waiting for file... (${elapsed}s elapsed, attempt ${attempt})`);
+            }
+
+            // Wait before next poll
+            await new Promise(resolve => setTimeout(resolve, pollInterval));
+        }
 
         if (!fileInfo) {
-            console.log(`[USENET-UNIVERSAL] Video file not found for: ${decodedReleaseName}`);
-            return res.status(404).send('Video file not found');
+            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+            console.log(`[USENET-UNIVERSAL] Video file not found after ${elapsed}s (${attempt} attempts)`);
+            return res.status(404).send(`Video file not found after waiting ${elapsed}s. The download may still be starting or extracting. Please try again in a moment.`);
         }
 
         console.log(`[USENET-UNIVERSAL] Resolved to: ${fileInfo.path} (${fileInfo.size} bytes)`);
