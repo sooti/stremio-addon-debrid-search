@@ -1440,6 +1440,224 @@ app.get('/usenet/personal/*', async (req, res) => {
     }
 });
 
+// Universal Usenet streaming endpoint - dynamically resolves file location
+// This endpoint queries the file server API to find the current file path
+// Works even when files move from incomplete/ to personal/ during completion
+// Enables immediate streaming without waiting for 5% download threshold
+app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
+    const { releaseName, type, id } = req.params;
+    let axiosResponse = null; // Track response for cleanup
+
+    try {
+        const configJson = req.query.config;
+        if (!configJson) {
+            return res.status(400).send('Missing configuration');
+        }
+
+        const decodedConfigJson = decodeURIComponent(configJson);
+        if (decodedConfigJson.length > 100000) {
+            return res.status(400).send('Config parameter too large');
+        }
+        const config = JSON.parse(decodedConfigJson);
+
+        if (!config.fileServerUrl) {
+            return res.status(400).send('File server not configured');
+        }
+
+        const decodedReleaseName = decodeURIComponent(releaseName);
+        console.log(`[USENET-UNIVERSAL] Stream request for: ${decodedReleaseName}`);
+
+        // Query file server API to find current file location
+        const { findVideoFileViaAPI } = await import('./server/usenet/video-finder.js');
+        const fileInfo = await findVideoFileViaAPI(
+            config.fileServerUrl,
+            decodedReleaseName,
+            type === 'series' ? { season: id.split(':')[1], episode: id.split(':')[2] } : {},
+            config.fileServerPassword
+        );
+
+        if (!fileInfo) {
+            console.log(`[USENET-UNIVERSAL] Video file not found for: ${decodedReleaseName}`);
+            return res.status(404).send('Video file not found');
+        }
+
+        console.log(`[USENET-UNIVERSAL] Resolved to: ${fileInfo.path} (${fileInfo.size} bytes)`);
+
+        // Track this stream
+        const streamKey = `universal:${decodedReleaseName}`;
+        if (!ACTIVE_USENET_STREAMS.has(streamKey)) {
+            ACTIVE_USENET_STREAMS.set(streamKey, {
+                lastAccess: Date.now(),
+                streamCount: 1,
+                activeConnections: 0,
+                maxBytePosition: 0,
+                fileSize: fileInfo.size || 0,
+                completionPercentage: 0,
+                config: {
+                    sabnzbdUrl: config.sabnzbdUrl,
+                    sabnzbdApiKey: config.sabnzbdApiKey
+                },
+                videoFilePath: fileInfo.path,
+                usenetConfig: config,
+                releaseName: decodedReleaseName,
+                isUniversal: true
+            });
+            console.log(`[USENET-UNIVERSAL] Created new stream tracker: ${streamKey}`);
+        }
+
+        const streamInfo = ACTIVE_USENET_STREAMS.get(streamKey);
+        streamInfo.lastAccess = Date.now();
+        streamInfo.activeConnections++;
+        console.log(`[USENET-UNIVERSAL] Active connections: ${streamInfo.activeConnections}`);
+
+        // Store config for auto-clean
+        if (config.fileServerUrl && config.autoCleanOldFiles) {
+            USENET_CONFIGS.set(config.fileServerUrl, config);
+        }
+
+        // Track range requests for completion calculation
+        if (req.headers.range) {
+            const rangeMatch = req.headers.range.match(/bytes=(\d+)-(\d*)/);
+            if (rangeMatch) {
+                const startByte = parseInt(rangeMatch[1]);
+                if (startByte > streamInfo.maxBytePosition) {
+                    streamInfo.maxBytePosition = startByte;
+                }
+            }
+        }
+
+        // Handle connection close - CRITICAL for preventing memory leaks
+        const cleanupConnection = () => {
+            streamInfo.activeConnections--;
+            console.log(`[USENET-UNIVERSAL] Connection closed for ${streamKey}, active: ${streamInfo.activeConnections}`);
+
+            // MEMORY LEAK FIX: Destroy axios response stream if it exists
+            if (axiosResponse && axiosResponse.data && typeof axiosResponse.data.destroy === 'function') {
+                try {
+                    axiosResponse.data.destroy();
+                    console.log(`[USENET-UNIVERSAL] Destroyed axios response stream`);
+                } catch (e) {
+                    console.log(`[USENET-UNIVERSAL] Error destroying stream: ${e.message}`);
+                }
+            }
+            axiosResponse = null; // Clear reference for GC
+
+            if (streamInfo.activeConnections === 0 && streamInfo.usenetConfig?.deleteOnStreamStop) {
+                const completionThreshold = 90;
+                if (streamInfo.completionPercentage >= completionThreshold) {
+                    console.log(`[USENET-UNIVERSAL] Stream finished (${streamInfo.completionPercentage}%), scheduling delete`);
+                    setTimeout(async () => {
+                        if (streamInfo.activeConnections === 0) {
+                            console.log(`[USENET-UNIVERSAL] Deleting finished file: ${fileInfo.path}`);
+                            try {
+                                // Delete file from server
+                                const axios = (await import('axios')).default;
+                                const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
+                                const headers = {};
+                                if (apiKey) headers['X-API-Key'] = apiKey;
+
+                                await axios.delete(
+                                    `${config.fileServerUrl.replace(/\/$/, '')}/api/delete`,
+                                    {
+                                        data: { path: fileInfo.path },
+                                        headers,
+                                        timeout: 5000
+                                    }
+                                );
+                                console.log(`[USENET-UNIVERSAL] File deleted successfully`);
+                            } catch (e) {
+                                console.log(`[USENET-UNIVERSAL] Error deleting file: ${e.message}`);
+                            }
+                            ACTIVE_USENET_STREAMS.delete(streamKey);
+                        }
+                    }, 30000); // Wait 30s before deleting
+                }
+            }
+        };
+
+        req.on('close', cleanupConnection);
+        req.on('error', (err) => {
+            console.log(`[USENET-UNIVERSAL] Request error: ${err.message}`);
+            cleanupConnection();
+        });
+
+        // Proxy to file server
+        const fileServerUrl = config.fileServerUrl.replace(/\/$/, '');
+        const proxyUrl = `${fileServerUrl}/${fileInfo.path}`;
+        console.log(`[USENET-UNIVERSAL] Proxying to: ${proxyUrl}`);
+
+        const axios = (await import('axios')).default;
+        const headers = {};
+        if (req.headers.range) {
+            headers['Range'] = req.headers.range;
+        }
+
+        const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
+        if (apiKey) {
+            headers['X-API-Key'] = apiKey;
+        }
+
+        // Make request to file server
+        axiosResponse = await axios.get(proxyUrl, {
+            headers,
+            responseType: 'stream',
+            validateStatus: (status) => status < 500,
+            timeout: 60000
+        });
+
+        // Forward response status and headers
+        res.status(axiosResponse.status);
+        Object.keys(axiosResponse.headers).forEach(key => {
+            res.setHeader(key, axiosResponse.headers[key]);
+        });
+
+        // Update file size and completion
+        if (axiosResponse.headers['content-range']) {
+            const rangeMatch = axiosResponse.headers['content-range'].match(/bytes \d+-\d+\/(\d+)/);
+            if (rangeMatch) {
+                streamInfo.fileSize = parseInt(rangeMatch[1]);
+            }
+        } else if (axiosResponse.headers['content-length']) {
+            streamInfo.fileSize = parseInt(axiosResponse.headers['content-length']);
+        }
+
+        if (streamInfo.fileSize > 0) {
+            streamInfo.completionPercentage = Math.round((streamInfo.maxBytePosition / streamInfo.fileSize) * 100);
+        }
+
+        // MEMORY LEAK FIX: Properly handle stream errors and cleanup
+        axiosResponse.data.on('error', (err) => {
+            console.log(`[USENET-UNIVERSAL] Stream error: ${err.message}`);
+            cleanupConnection();
+        });
+
+        res.on('error', (err) => {
+            console.log(`[USENET-UNIVERSAL] Response error: ${err.message}`);
+            cleanupConnection();
+        });
+
+        // Pipe the response
+        axiosResponse.data.pipe(res);
+
+    } catch (error) {
+        console.error('[USENET-UNIVERSAL] Error:', error.message);
+
+        // MEMORY LEAK FIX: Clean up axios response on error
+        if (axiosResponse && axiosResponse.data && typeof axiosResponse.data.destroy === 'function') {
+            try {
+                axiosResponse.data.destroy();
+            } catch (e) {
+                // Ignore cleanup errors
+            }
+        }
+        axiosResponse = null; // Clear reference
+
+        if (!res.headersSent) {
+            return res.status(500).send('Error streaming file');
+        }
+    }
+});
+
 // Usenet progressive streaming endpoint with range request support
 app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
     const { nzbUrl, title, type, id } = req.params;
@@ -1636,6 +1854,28 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
             console.log(`[USENET] Keeping all completed folders (personal files)`);
 
         }
+
+        // IMMEDIATE STREAMING: If file server is configured, redirect to universal endpoint
+        // This allows streaming to start as soon as any data is available, and continues
+        // working even when SABnzbd moves files from incomplete/ to complete/
+        // The universal endpoint queries the file server API dynamically to find current location
+        if (config.fileServerUrl && config.immediateStreaming !== false) {
+            console.log('[USENET] File server configured - redirecting to universal streaming endpoint for immediate playback');
+            console.log('[USENET] Universal endpoint will stream as soon as file is available (no 5% wait)');
+
+            const encodedReleaseName = encodeURIComponent(decodedTitle);
+            const encodedType = encodeURIComponent(type);
+            const encodedId = encodeURIComponent(id);
+            const configParam = encodeURIComponent(configJson);
+
+            const universalUrl = `/usenet/universal/${encodedReleaseName}/${encodedType}/${encodedId}?config=${configParam}`;
+            console.log(`[USENET] Redirecting to: ${universalUrl}`);
+
+            return res.redirect(307, universalUrl);
+        }
+
+        // FALLBACK: Progressive streaming with 5% wait (when file server not configured)
+        console.log('[USENET] File server not configured or immediate streaming disabled - using progressive mode with 5% wait');
 
         // Check current download status
         let status = await SABnzbd.getDownloadStatus(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId);
