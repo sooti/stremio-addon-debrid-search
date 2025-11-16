@@ -88,8 +88,8 @@ export async function waitForFileExtraction(params) {
                 );
                 if (videoFilePath) {
                     console.log('[USENET] ✓ Found video file in local filesystem (during download):', videoFilePath);
-                    // For partial downloads, verify file has minimum size (5% of expected or 100MB, whichever is smaller)
-                    const minSize = Math.min(100 * 1024 * 1024, (videoFileSize || 0) * 0.05);
+                    // For partial downloads, verify file has minimum size (1% of expected or 100MB, whichever is smaller)
+                    const minSize = Math.min(100 * 1024 * 1024, (videoFileSize || 0) * 0.01);
                     const actualSize = fs.statSync(videoFilePath).size;
                     if (actualSize >= minSize) {
                         console.log(`[USENET] ✓ File has sufficient size for streaming: ${(actualSize / 1024 / 1024).toFixed(2)} MB`);

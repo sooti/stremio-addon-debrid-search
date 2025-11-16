@@ -95,6 +95,11 @@ class Config:
     def SOURCE_DIR(self) -> str:
         return os.environ.get('FASTAPI_SOURCE_DIR', '')
 
+    @property
+    def INCOMPLETE_DIR(self) -> str:
+        """SABnzbd incomplete directory for in-progress downloads"""
+        return os.environ.get('FASTAPI_INCOMPLETE_DIR', '')
+
     VIDEO_EXTENSIONS = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.3gp', '.ogv', '.ts', '.m2ts']
 
 config = Config()
@@ -438,18 +443,20 @@ async def health_check():
     }
 
 
-@app.get("/api/list")
-async def list_files(
-    authenticated: bool = Depends(verify_api_key)
-) -> JSONResponse:
-    """List all video files in the directory tree"""
+def scan_directory_for_videos(root_dir: str, seen_files: set, is_incomplete_dir: bool = False) -> list:
+    """
+    Scan a directory tree for video files (both direct and in archives)
+    Returns list of file objects
+    """
     files = []
-    seen_files = set()
 
-    # Scan primary directory
-    root_dir = config.RAR2FS_MOUNT or config.SOURCE_DIR
+    if not root_dir or not os.path.exists(root_dir):
+        logger.warning(f"Directory does not exist or is not configured: {root_dir}")
+        return files
+
     logger.info(f"Scanning directory: {root_dir}")
 
+    # Scan for direct video files
     for root, dirs, files_list in os.walk(root_dir):
         for filename in files_list:
             ext = os.path.splitext(filename)[1].lower()
@@ -457,9 +464,13 @@ async def list_files(
                 full_path = os.path.join(root, filename)
                 rel_path = os.path.relpath(full_path, root_dir)
 
+                # Create unique key for deduplication
+                file_key = f"{filename}_{os.path.getsize(full_path) if os.path.exists(full_path) else 0}"
+
                 try:
                     stat = os.stat(full_path)
-                    is_complete = 'incomplete' not in rel_path.lower()
+                    # Mark as incomplete if scanning incomplete dir OR path contains 'incomplete'
+                    is_complete = not is_incomplete_dir and 'incomplete' not in rel_path.lower()
                     folder_name = os.path.basename(os.path.dirname(full_path))
 
                     files.append({
@@ -471,12 +482,12 @@ async def list_files(
                         'modified': stat.st_mtime,
                         'isComplete': is_complete
                     })
-                    seen_files.add(filename)
+                    seen_files.add(file_key)
                 except Exception as e:
                     logger.error(f"Error stating file {full_path}: {e}")
 
     # Now scan for archive files and list their video contents
-    logger.info("Scanning for archive files (RAR, 7z, ZIP)")
+    logger.info(f"Scanning for archive files in {root_dir}")
     archives_found = 0
     videos_in_archives = 0
 
@@ -499,12 +510,15 @@ async def list_files(
                     if ext in config.VIDEO_EXTENSIONS:
                         filename = os.path.basename(item['name'])
 
-                        # Skip if we already have this filename (avoid duplicates)
-                        if filename in seen_files:
+                        # Create unique key for deduplication
+                        file_key = f"{filename}_{item['size']}"
+
+                        # Skip if we already have this file (avoid duplicates)
+                        if file_key in seen_files:
                             continue
 
                         # Mark as complete if NOT in incomplete directory
-                        is_complete = 'incomplete' not in rel_archive_path.lower()
+                        is_complete = not is_incomplete_dir and 'incomplete' not in rel_archive_path.lower()
 
                         # Extract folder name (archive's parent directory)
                         folder_name = os.path.basename(os.path.dirname(archive_path))
@@ -522,21 +536,53 @@ async def list_files(
                             'isComplete': is_complete,
                             'inArchive': True  # Flag to indicate this is from an archive
                         })
-                        seen_files.add(filename)
+                        seen_files.add(file_key)
                         videos_in_archives += 1
             except Exception as e:
                 logger.error(f"Error reading archive {archive_path}: {e}")
 
-    logger.info(f"Found {archives_found} archives containing {videos_in_archives} video files")
+    if archives_found > 0:
+        logger.info(f"Found {archives_found} archives containing {videos_in_archives} video files in {root_dir}")
+
+    return files
+
+
+@app.get("/api/list")
+async def list_files(
+    authenticated: bool = Depends(verify_api_key)
+) -> JSONResponse:
+    """List all video files in the directory tree (scans all configured directories)"""
+    all_files = []
+    seen_files = set()
+
+    # Build list of directories to scan (universal search)
+    directories_to_scan = []
+
+    # Primary directory (RAR2FS mount or source dir)
+    primary_dir = config.RAR2FS_MOUNT or config.SOURCE_DIR
+    if primary_dir:
+        directories_to_scan.append((primary_dir, False))  # (path, is_incomplete)
+
+    # Incomplete directory (for in-progress downloads)
+    if config.INCOMPLETE_DIR and config.INCOMPLETE_DIR != primary_dir:
+        directories_to_scan.append((config.INCOMPLETE_DIR, True))
+
+    logger.info(f"Universal file search: scanning {len(directories_to_scan)} directories")
+
+    # Scan all configured directories
+    for directory, is_incomplete in directories_to_scan:
+        files_from_dir = scan_directory_for_videos(directory, seen_files, is_incomplete)
+        all_files.extend(files_from_dir)
+        logger.info(f"Found {len(files_from_dir)} files in {directory}")
 
     # Sort by completion status and modification time
-    files.sort(key=lambda x: (not x['isComplete'], -x['modified']))
+    all_files.sort(key=lambda x: (not x['isComplete'], -x['modified']))
 
-    completed_count = sum(1 for f in files if f['isComplete'])
-    incomplete_count = len(files) - completed_count
-    logger.info(f"Found {len(files)} total files ({completed_count} completed, {incomplete_count} in progress)")
+    completed_count = sum(1 for f in all_files if f['isComplete'])
+    incomplete_count = len(all_files) - completed_count
+    logger.info(f"Found {len(all_files)} total files ({completed_count} completed, {incomplete_count} in progress)")
 
-    return JSONResponse(content={'files': files})
+    return JSONResponse(content={'files': all_files})
 
 
 @app.get("/api/check-archives")
