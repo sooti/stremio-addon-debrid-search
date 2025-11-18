@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     python3 \
     make \
     g++ \
+    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy only package.json and package-lock.json first (better build caching)
