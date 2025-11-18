@@ -78,14 +78,22 @@ for db in "${DATABASES[@]}"; do
     if [ -n "${SOURCE_FILE}" ] && [ -f "${SOURCE_FILE}" ]; then
         echo -e "${GREEN}Importing ${db}...${NC}"
 
-        # Verify database integrity before importing
+        TEMP_NAME="${db}.import.$(date +%s).$$"
+        TEMP_PATH="/tmp/${TEMP_NAME}"
+
+        # Copy database to container temp location for verification
+        docker cp "${SOURCE_FILE}" "${CONTAINER_NAME}:${TEMP_PATH}"
+
+        # Verify database integrity inside the container to avoid local sqlite dependency
         echo -e "  ${YELLOW}Verifying database integrity...${NC}"
-        INTEGRITY_CHECK=$(sqlite3 "${SOURCE_FILE}" "PRAGMA integrity_check;" 2>&1 || echo "FAILED")
+        INTEGRITY_CHECK=$(docker exec "${CONTAINER_NAME}" sh -c "sqlite3 '${TEMP_PATH}' 'PRAGMA integrity_check;'" 2>&1 || echo "FAILED")
 
         if [[ "${INTEGRITY_CHECK}" != *"ok"* ]]; then
             echo -e "  ${RED}✗ Database integrity check failed for ${SOURCE_FILE}${NC}"
             echo -e "  ${YELLOW}Skipping import of corrupted database${NC}"
             echo -e "  ${YELLOW}Please use a different backup or run recovery script${NC}"
+            echo -e "  ${YELLOW}Details: ${INTEGRITY_CHECK}${NC}"
+            docker exec "${CONTAINER_NAME}" sh -c "rm -f '${TEMP_PATH}'" 2>/dev/null || true
             continue
         fi
         echo -e "  ${GREEN}✓ Database integrity verified${NC}"
@@ -96,8 +104,8 @@ for db in "${DATABASES[@]}"; do
         # CRITICAL: Remove old WAL and SHM files to prevent corruption
         docker exec "${CONTAINER_NAME}" sh -c "rm -f /app/data/${db}-wal /app/data/${db}-shm" 2>/dev/null || true
 
-        # Copy database to container
-        docker cp "${SOURCE_FILE}" "${CONTAINER_NAME}:/app/data/${db}"
+        # Move verified database into place
+        docker exec "${CONTAINER_NAME}" sh -c "mv '${TEMP_PATH}' '/app/data/${db}'"
 
         # Set proper permissions
         docker exec "${CONTAINER_NAME}" chown 1000:1000 "/app/data/${db}" 2>/dev/null || true
