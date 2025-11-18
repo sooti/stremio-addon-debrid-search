@@ -8,7 +8,7 @@ services:
     image: sootio
     container_name: sootio
     ports:
-      - "55774:55774"
+      - "55771:55771"
     volumes:
       - sootio-data:/app/data  # Persist SQLite cache data
     networks:
@@ -17,9 +17,15 @@ services:
       - .env
     environment:
       - NODE_ENV=production
-    command: ["npm", "run", "dev"]
-    restart: unless-stopped
+    command: ["npm", "run", "standalone"]
 
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 512M    # hard cap; container OOMs if exceeded
+        reservations:
+          memory: 256M    # soft reservation
 volumes:
   sootio-data:  # Named volume for persistent data
 
