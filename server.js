@@ -98,6 +98,7 @@ const RESOLVED_URL_CACHE_MAX_SIZE = 500; // Reduced from 2000 to prevent memory 
 const CACHE_TIMERS = new Map(); // Track setTimeout IDs for proper cleanup
 const PENDING_RESOLVES = new Map();
 const PENDING_RESOLVES_MAX_SIZE = 100; // Reduced from 1000 to prevent memory issues
+const HTTP_RESOLVE_CACHE_TTL_MS = parseInt(process.env.HTTP_RESOLVE_CACHE_TTL_MS || '600000', 10); // 10 min default
 
 // Helper function to evict oldest cache entry (LRU-style FIFO eviction)
 function evictOldestCacheEntry() {
@@ -148,6 +149,45 @@ async function getCacheValue(cacheKey) {
     }
 
     return null;
+}
+
+async function getHttpResolveCacheEntry(cacheKey) {
+    const inMemory = await getCacheValue(cacheKey);
+    if (inMemory) {
+        return { url: inMemory, source: 'memory' };
+    }
+
+    if (sqliteCache?.isEnabled()) {
+        try {
+            const sqliteEntry = await sqliteCache.getCachedHttpResolveUrl(cacheKey);
+            if (sqliteEntry?.url) {
+                const expiresAt = sqliteEntry.expiresAt ? new Date(sqliteEntry.expiresAt).getTime() : null;
+                const ttlMs = expiresAt ? Math.max(0, expiresAt - Date.now()) : HTTP_RESOLVE_CACHE_TTL_MS;
+                if (ttlMs > 0) {
+                    await setCacheWithTimer(cacheKey, sqliteEntry.url, ttlMs);
+                }
+                return { url: sqliteEntry.url, source: 'sqlite' };
+            }
+        } catch (error) {
+            console.error(`[HTTP-RESOLVER] Failed to read SQLite cache for ${cacheKey.substring(0, 8)}: ${error.message}`);
+        }
+    }
+
+    return null;
+}
+
+async function persistHttpResolveCacheEntry(cacheKey, url) {
+    if (!url) return;
+
+    await setCacheWithTimer(cacheKey, url, HTTP_RESOLVE_CACHE_TTL_MS);
+
+    if (sqliteCache?.isEnabled()) {
+        try {
+            await sqliteCache.setCachedHttpResolveUrl(cacheKey, url, HTTP_RESOLVE_CACHE_TTL_MS);
+        } catch (error) {
+            console.error(`[HTTP-RESOLVER] Failed to persist SQLite cache for ${cacheKey.substring(0, 8)}: ${error.message}`);
+        }
+    }
 }
 
 
@@ -490,10 +530,11 @@ app.get('/resolve/httpstreaming/:url', async (req, res) => {
     try {
         let finalUrl;
 
-        const cachedValue = await getCacheValue(cacheKey);
-        if (cachedValue) {
-            finalUrl = cachedValue;
-            console.log(`[HTTP-RESOLVER] Using cached URL for key: ${cacheKeyHash.substring(0, 8)}...`);
+        const cacheEntry = await getHttpResolveCacheEntry(cacheKey);
+        if (cacheEntry?.url) {
+            finalUrl = cacheEntry.url;
+            const sourceLabel = cacheEntry.source === 'sqlite' ? 'SQLite cached' : 'cached';
+            console.log(`[HTTP-RESOLVER] Using ${sourceLabel} URL for key: ${cacheKeyHash.substring(0, 8)}...`);
         } else if (PENDING_RESOLVES.has(cacheKey)) {
             console.log(`[HTTP-RESOLVER] Joining in-flight resolve for key: ${cacheKeyHash.substring(0, 8)}...`);
             finalUrl = await PENDING_RESOLVES.get(cacheKey);
@@ -545,10 +586,7 @@ app.get('/resolve/httpstreaming/:url', async (req, res) => {
             finalUrl = await pendingRequest;
 
             if (finalUrl) {
-                // MEMORY LEAK FIX: Use new cache function with proper timer tracking
-                // Cache TTL for HTTP streams
-                const cacheTtlMs = parseInt(process.env.HTTP_RESOLVE_CACHE_TTL_MS || '600000', 10); // 10 min default (reduced from 1 hour)
-                await setCacheWithTimer(cacheKey, finalUrl, cacheTtlMs);
+                await persistHttpResolveCacheEntry(cacheKey, finalUrl);
             }
         }
 
