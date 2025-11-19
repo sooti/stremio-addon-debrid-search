@@ -24,7 +24,7 @@ NC='\033[0m' # No Color
 
 # Flag -> service mappings
 declare -A FLAG_SERVICE_MAP=(
-    ["--http-streams"]="hdhub4u"
+    ["--http-streams"]="httpstreaming"
     ["--realdebrid"]="realdebrid"
     ["--alldebrid"]="alldebrid"
     ["--premiumize"]="premiumize"
@@ -54,7 +54,7 @@ declare -A SERVICE_LABELS=(
     ["torbox"]="TorBox torrents"
     ["debriderapp"]="DebriderApp torrents"
     ["scraper"]="Public & specialized scrapers"
-    ["hdhub4u"]="HTTP Streams (HDHub4u pages)"
+    ["httpstreaming"]="HTTP Streams (4khdhub, hdhub4u, uhdmovies, moviesdrive)"
     ["search"]="General search caches"
 )
 
@@ -70,7 +70,7 @@ Usage: ./scripts/clear-sqlite-cache.sh [options]
 
 Options:
   --all                  Clear every row from cache.db (overrides other options)
-  --http-streams         Remove cached HTTP stream pages (HDHub4u)
+  --http-streams         Remove all cached HTTP stream pages (4khdhub, hdhub4u, uhdmovies, moviesdrive)
   --realdebrid           Remove cached torrents for Real-Debrid
   --alldebrid            Remove cached torrents for AllDebrid
   --premiumize           Remove cached torrents for Premiumize
