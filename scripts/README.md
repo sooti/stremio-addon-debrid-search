@@ -85,6 +85,27 @@ SOOTIO_CONTAINER=my-sootio ./scripts/import-sqlite.sh
 0 2 * * * cd /path/to/sootio && ./scripts/export-sqlite.sh /backups/sootio-db
 ```
 
+### Clear Cache Entries
+
+Use `clear-sqlite-cache.sh` to wipe cached rows directly from the containerized SQLite database without stopping the addon.
+
+```bash
+./scripts/clear-sqlite-cache.sh --realdebrid
+./scripts/clear-sqlite-cache.sh --http-streams
+./scripts/clear-sqlite-cache.sh --all
+./scripts/clear-sqlite-cache.sh --service custom-provider --search-cache -y
+```
+
+Supported targets:
+- `--http-streams` (HDHub4u page cache)
+- `--realdebrid`, `--alldebrid`, `--premiumize`, `--offcloud`, `--torbox`, `--debriderapp`
+- `--scraper` (public/specialized scraper cache rows)
+- `--search-cache` (any release key marked as a search result)
+- `--service <name>` (custom service key, case-insensitive)
+- `--all` removes every entry regardless of service
+
+Use `--list` to display all built-in flags, and `-y/--yes` to skip the confirmation prompt. The script automatically starts the container defined by `SOOTIO_CONTAINER` (default `sootio`) and runs the SQLite statements in-place.
+
 ## Environment Variables
 
 - `SOOTIO_CONTAINER` - Docker container name (default: `sootio`)
